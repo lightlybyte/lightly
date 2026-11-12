@@ -2,6 +2,7 @@
 assembler.py - Two-pass assembler for the Re:G SIMT ISA, with optimizer.
 
 Adds immediate forms: ADDI, SUBI, MULI, ANDI, ORI, XORI, SHLI, SHRI.
+SETP's 4th operand (compare mode) is optional and defaults to 0 (<).
 """
 
 from __future__ import annotations
@@ -11,6 +12,10 @@ from dataclasses import dataclass
 
 from cpu import Opcode, encode
 
+
+# ============================================================
+# PARSED REPRESENTATION
+# ============================================================
 
 @dataclass(slots=True)
 class ParsedLine:
@@ -40,7 +45,11 @@ class Instr:
     is_label_only: bool = False
 
 
-def strip_comment(line):
+# ============================================================
+# PARSING
+# ============================================================
+
+def strip_comment(line: str) -> str:
     in_str = False
     for i, ch in enumerate(line):
         if ch == '"':
@@ -50,7 +59,7 @@ def strip_comment(line):
     return line
 
 
-def parse_line(line, line_no):
+def parse_line(line: str, line_no: int) -> ParsedLine | None:
     line = strip_comment(line).strip()
     if not line:
         return None
@@ -74,7 +83,7 @@ def parse_line(line, line_no):
                       pred=pred, pred_neg=pred_neg)
 
 
-def reg_index(tok, prefix):
+def reg_index(tok: str, prefix: str) -> int:
     if not tok or tok[0] != prefix:
         raise ValueError(f"expected {prefix}N, got {tok!r}")
     n = int(tok[1:])
@@ -83,9 +92,13 @@ def reg_index(tok, prefix):
     return n
 
 
-def imm_value(tok):
+def imm_value(tok: str) -> int:
     return int(tok, 0)
 
+
+# ============================================================
+# INSTRUCTION FORMATS
+# ============================================================
 
 INSTR_FORMATS = {
     "NOP":    (Opcode.NOP,    ""),
@@ -131,10 +144,22 @@ INSTR_FORMATS = {
     "SYSCALL":(Opcode.SYSCALL,"RI"),
 }
 
+BRANCHES = {"BRA", "BRA_DIV"}
+TERMINATORS = {"HALT", "RET"}
+
+# Trailing operands that may be omitted; the default is appended if absent.
+OPTIONAL_TAIL = {
+    "SETP": (1, "0"),   # compare mode defaults to 0 (<)
+}
+
+
+# ============================================================
+# ASSEMBLER
+# ============================================================
 
 class Assembler:
     def __init__(self, optimize: bool = True):
-        self.labels = {}
+        self.labels: dict[str, int] = {}
         self.pc = 0
         self.org = 0
         self.optimize = optimize
@@ -149,10 +174,10 @@ class Assembler:
         self._encode_all(instrs)
         return self._emit(instrs)
 
-    def _parse_and_flatten(self, source):
+    def _parse_and_flatten(self, source: str) -> list[Instr]:
         parsed = [parse_line(r, i) for i, r in enumerate(source.splitlines(), 1)]
         parsed = [p for p in parsed if p]
-        instrs = []
+        instrs: list[Instr] = []
         for p in parsed:
             if p.mnemonic is None:
                 instrs.append(Instr(mnemonic="", operands=[], line_no=p.line_no,
@@ -163,7 +188,7 @@ class Assembler:
                                     pred_neg=p.pred_neg, label=p.label))
         return instrs
 
-    def _assign_labels(self, instrs):
+    def _assign_labels(self, instrs: list[Instr]) -> None:
         self.labels = {}
         pc = self.org
         for ins in instrs:
@@ -182,7 +207,7 @@ class Assembler:
             elif ins.mnemonic and not ins.mnemonic.startswith('.'):
                 pc += 8
 
-    def _encode_all(self, instrs):
+    def _encode_all(self, instrs: list[Instr]) -> None:
         pc = self.org
         for ins in instrs:
             if ins.is_label_only:
@@ -203,19 +228,36 @@ class Assembler:
                 self._encode_instruction(ins, pc)
                 pc += 8
 
-    def _encode_instruction(self, ins, pc):
+    def _encode_instruction(self, ins: Instr, pc: int) -> None:
         if ins.mnemonic not in INSTR_FORMATS:
             raise SyntaxError(
                 f"line {ins.line_no}: unknown mnemonic {ins.mnemonic!r}")
         op, fmt = INSTR_FORMATS[ins.mnemonic]
-        if len(ins.operands) != len(fmt):
-            raise SyntaxError(
-                f"line {ins.line_no}: {ins.mnemonic} expects {len(fmt)} "
-                f"operands, got {len(ins.operands)}")
+
+        # Optional trailing operands
+        tail = OPTIONAL_TAIL.get(ins.mnemonic)
+        n_got = len(ins.operands)
+        if tail:
+            tail_count, tail_default = tail
+            n_min = len(fmt) - tail_count
+            if not (n_min <= n_got <= len(fmt)):
+                raise SyntaxError(
+                    f"line {ins.line_no}: {ins.mnemonic} expects "
+                    f"{n_min}..{len(fmt)} operands, got {n_got}")
+            operands = list(ins.operands)
+            while len(operands) < len(fmt):
+                operands.append(tail_default)
+        else:
+            if n_got != len(fmt):
+                raise SyntaxError(
+                    f"line {ins.line_no}: {ins.mnemonic} expects {len(fmt)} "
+                    f"operands, got {n_got}")
+            operands = ins.operands
+
         ins.op = op
         rd = ra = rb = rc = pd = 0
         imm = 0
-        for i, (kind, tok) in enumerate(zip(fmt, ins.operands)):
+        for i, (kind, tok) in enumerate(zip(fmt, operands)):
             try:
                 if kind == 'R':
                     reg = reg_index(tok, 'r')
@@ -241,7 +283,7 @@ class Assembler:
         ins.rd, ins.ra, ins.rb, ins.rc, ins.pd = rd, ra, rb, rc, pd
         ins.imm = imm
 
-    def _emit(self, instrs):
+    def _emit(self, instrs: list[Instr]) -> bytes:
         out = bytearray()
         pc = self.org
         for ins in instrs:
@@ -272,10 +314,14 @@ class Assembler:
         return bytes(out)
 
 
-def _eliminate_unreachable(instrs):
+# ============================================================
+# OPTIMIZER
+# ============================================================
+
+def _eliminate_unreachable(instrs: list[Instr]) -> list[Instr]:
     targets = set()
     for ins in instrs:
-        if ins.mnemonic in {"BRA", "BRA_DIV"} and ins.operands:
+        if ins.mnemonic in BRANCHES and ins.operands:
             targets.add(ins.operands[0])
     out = []
     reachable = True
@@ -290,25 +336,33 @@ def _eliminate_unreachable(instrs):
         if not reachable:
             continue
         out.append(ins)
-        if ins.mnemonic in {"HALT", "RET", "BRA", "BRA_DIV"}:
+        if ins.mnemonic in TERMINATORS or ins.mnemonic in BRANCHES:
             reachable = False
     return out
 
 
-def _eliminate_mov_self(instrs):
+def _eliminate_mov_self(instrs: list[Instr]) -> list[Instr]:
     return [ins for ins in instrs
             if not (ins.mnemonic == "MOV" and len(ins.operands) == 2
                     and ins.operands[0] == ins.operands[1])]
 
 
-def _eliminate_nop(instrs):
+def _eliminate_nop(instrs: list[Instr]) -> list[Instr]:
     return [ins for ins in instrs
             if not (ins.mnemonic == "NOP" and not ins.label)]
 
 
+# ============================================================
+# PUBLIC
+# ============================================================
+
 def assemble(source: str, optimize: bool = True) -> bytes:
     return Assembler(optimize=optimize).assemble(source)
 
+
+# ============================================================
+# RUNNER
+# ============================================================
 
 def run_program(code, fb_w, fb_h, origin=0x1000, max_cycles=10_000_000):
     from ram import MemorySystem
@@ -329,6 +383,10 @@ def run_program(code, fb_w, fb_h, origin=0x1000, max_cycles=10_000_000):
     print(f"fence {fence} signalled: {sched.is_fence_signalled(fence)}")
     return mem
 
+
+# ============================================================
+# CLI
+# ============================================================
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Re:G assembler")
