@@ -1,23 +1,19 @@
 """
-assembler.py - Two-pass assembler for the Re:G SIMT ISA.
+assembler.py - Two-pass assembler for the Re:G SIMT ISA, with runner.
 
 CLI:
-  python assembler.py <input.s>              # assemble to <input>.bin
-  python assembler.py <input.s> -o out.bin   # explicit output
-  python assembler.py <input.s> --run        # assemble then execute
-  python assembler.py <input.s> --run --fb 1920x1080
+  python assembler.py kernel.s
+  python assembler.py kernel.s --run
+  python assembler.py kernel.s --run --fb 640x480
 """
 
 from __future__ import annotations
 import argparse
 import sys
 from dataclasses import dataclass
+
 from cpu import Opcode, encode
 
-
-# ============================================================
-# PARSING (unchanged from previous version)
-# ============================================================
 
 @dataclass(slots=True)
 class ParsedLine:
@@ -29,7 +25,7 @@ class ParsedLine:
     pred_neg: bool = False
 
 
-def strip_comment(line: str) -> str:
+def strip_comment(line):
     in_str = False
     for i, ch in enumerate(line):
         if ch == '"':
@@ -39,7 +35,7 @@ def strip_comment(line: str) -> str:
     return line
 
 
-def parse_line(line: str, line_no: int) -> ParsedLine | None:
+def parse_line(line, line_no):
     line = strip_comment(line).strip()
     if not line:
         return None
@@ -63,7 +59,7 @@ def parse_line(line: str, line_no: int) -> ParsedLine | None:
                       pred=pred, pred_neg=pred_neg)
 
 
-def reg_index(tok: str, prefix: str) -> int:
+def reg_index(tok, prefix):
     if not tok or tok[0] != prefix:
         raise ValueError(f"expected {prefix}N, got {tok!r}")
     n = int(tok[1:])
@@ -72,7 +68,7 @@ def reg_index(tok: str, prefix: str) -> int:
     return n
 
 
-def imm_value(tok: str) -> int:
+def imm_value(tok):
     return int(tok, 0)
 
 
@@ -115,15 +111,14 @@ INSTR_FORMATS = {
 
 class Assembler:
     def __init__(self):
-        self.labels: dict[str, int] = {}
+        self.labels = {}
         self.pc = 0
         self.org = 0
 
-    def assemble(self, source: str) -> bytes:
-        parsed = [parse_line(raw, i) for i, raw in enumerate(source.splitlines(), 1)]
+    def assemble(self, source):
+        parsed = [parse_line(r, i) for i, r in enumerate(source.splitlines(), 1)]
         parsed = [p for p in parsed if p]
 
-        # Pass 1
         self.pc = 0
         for p in parsed:
             if p.label:
@@ -142,7 +137,6 @@ class Assembler:
             elif p.mnemonic and not p.mnemonic.startswith('.'):
                 self.pc += 8
 
-        # Pass 2
         out = bytearray()
         self.pc = 0
         for p in parsed:
@@ -152,8 +146,7 @@ class Assembler:
                     out.append(0)
                 self.pc = target
             elif p.mnemonic == ".word":
-                w = imm_value(p.operands[0])
-                out += w.to_bytes(8, "little")
+                out += imm_value(p.operands[0]).to_bytes(8, "little")
                 self.pc += 8
             elif p.mnemonic == ".string":
                 s = p.operands[0].strip('"').encode()
@@ -164,11 +157,11 @@ class Assembler:
                 out += b"\x00" * (8 * n)
                 self.pc += 8 * n
             elif p.mnemonic and not p.mnemonic.startswith('.'):
-                out += self._encode_instruction(p).to_bytes(8, "little")
+                out += self._encode(p).to_bytes(8, "little")
                 self.pc += 8
         return bytes(out)
 
-    def _encode_instruction(self, p: ParsedLine) -> int:
+    def _encode(self, p):
         if p.mnemonic not in INSTR_FORMATS:
             raise SyntaxError(f"line {p.line_no}: unknown mnemonic {p.mnemonic}")
         op, fmt = INSTR_FORMATS[p.mnemonic]
@@ -187,75 +180,56 @@ class Assembler:
             elif kind == 'P':
                 pd = reg_index(tok, 'p') if tok.startswith('p') else int(tok)
             elif kind == 'I':
-                imm = imm_value(tok) & 0xFFFF
+                imm = imm_value(tok) & 0x7FFF
             elif kind == 'L':
                 if tok not in self.labels:
-                    raise SyntaxError(f"line {p.line_no}: undefined label {tok}")
+                    raise SyntaxError(
+                        f"line {p.line_no}: undefined label {tok}")
                 target = self.labels[tok]
                 word_pc = (self.pc - self.org) // 8
                 target_words = (target - self.org) // 8
-                imm = (target_words - word_pc) & 0xFFFF
+                imm = (target_words - word_pc) & 0x7FFF
         return encode(op, rd, ra, rb, rc, pd,
-                      pred=(p.pred != 0xFF), imm=imm)
+                      pred=(p.pred != 0xFF), pred_neg=p.pred_neg, imm=imm)
 
 
 def assemble(source: str) -> bytes:
     return Assembler().assemble(source)
 
 
-# ============================================================
-# RUNNER
-# ============================================================
-
-def run_program(code: bytes, fb_w: int, fb_h: int,
-                origin: int = 0x1000,
-                max_cycles: int = 10_000_000) -> None:
+def run_program(code, fb_w, fb_h, origin=0x1000, max_cycles=10_000_000):
     from ram import MemorySystem
     from cpu import SIMTCore
     from dma import DMAEngine
     from scheduler import Scheduler
 
     mem = MemorySystem(num_cores=1, fb_width=fb_w, fb_height=fb_h)
-    cores = [SIMTCore(core_id=0, num_warps=32, memory=mem.global_ram)] # type: ignore
+    cores = [SIMTCore(core_id=0, num_warps=32, memory=mem.global_ram)]
     dma = DMAEngine(mem.global_ram, mem.scratchpads, mem.framebuffer)
     sched = Scheduler(cores, mem, dma, ring_base=0x100)
-
-    # Load program at origin
     mem.global_ram.load(code, origin)
 
-    # Launch one block with one warp
     fence = sched.new_fence()
-    sched.submit_command([
-        1,              # DISPATCH
-        1,              # grid = 1x1
-        1,              # block = 1x1
-        1,              # warps per block
-        origin,         # kernel PC
-        0,              # args addr
-        fence,          # fence
-    ])
-
+    sched.submit_command([1, 1, 1, 1, origin, 0, fence])
     cycles = sched.run(max_cycles=max_cycles)
     print(f"executed {cycles} cycles")
     print(f"fence {fence} signalled: {sched.is_fence_signalled(fence)}")
     print(f"framebuffer checksum: {sum(mem.framebuffer.buffer) & 0xFFFFFFFF}")
+    return mem
 
 
-# ============================================================
-# CLI
-# ============================================================
-
-def main(argv: list[str] | None = None) -> int:
+def main(argv=None):
     ap = argparse.ArgumentParser(description="Re:G assembler")
-    ap.add_argument("input", help="assembly source file")
-    ap.add_argument("-o", "--output", help="output binary (default: <input>.bin)")
-    ap.add_argument("--run", action="store_true", help="assemble then run on the CPU")
-    ap.add_argument("--fb", default="320x240",
-                    help="framebuffer size WxH (default 320x240)")
-    ap.add_argument("--cycles", type=int, default=10_000_000,
-                    help="max cycles for --run")
-    ap.add_argument("--origin", type=lambda s: int(s, 0), default=0x1000,
-                    help="load address (default 0x1000)")
+    ap.add_argument("input")
+    ap.add_argument("-o", "--output")
+    ap.add_argument("--run", action="store_true")
+    ap.add_argument("--fb", default="320x240")
+    ap.add_argument("--cycles", type=int, default=10_000_000)
+    ap.add_argument("--origin", type=lambda s: int(s, 0), default=0x1000)
+    ap.add_argument("--screen", action="store_true",
+                    help="show the framebuffer in a non-blocking window")
+    ap.add_argument("--seconds", type=float, default=3.0,
+                    help="seconds to keep the window open")
     args = ap.parse_args(argv)
 
     src = open(args.input, "r", encoding="utf-8").read()
@@ -270,16 +244,31 @@ def main(argv: list[str] | None = None) -> int:
         f.write(code)
     print(f"assembled {len(code)} bytes -> {out_path}")
 
-    if args.run:
+    if args.run or args.screen:
         try:
             w, h = args.fb.lower().split('x')
             fb_w, fb_h = int(w), int(h)
         except ValueError:
-            print(f"error: bad --fb value {args.fb!r} (expected WxH)",
-                  file=sys.stderr)
+            print(f"error: bad --fb {args.fb!r}", file=sys.stderr)
             return 1
-        run_program(code, fb_w, fb_h, origin=args.origin,
-                    max_cycles=args.cycles)
+
+        mem = run_program(code, fb_w, fb_h, origin=args.origin,
+                          max_cycles=args.cycles)
+
+        if args.screen:
+            try:
+                from screen import Screen
+            except ImportError:
+                print("warning: tkinter unavailable; skipping window",
+                      file=sys.stderr)
+                return 0
+            import time
+            screen = Screen(mem.framebuffer, title="Re:G")
+            end = time.perf_counter() + args.seconds
+            while screen.running and time.perf_counter() < end:
+                screen.pump()
+                time.sleep(1 / 60)
+            screen.close()
     return 0
 
 

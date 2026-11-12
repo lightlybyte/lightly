@@ -1,14 +1,5 @@
 """
 cpu.py - SIMT processor core for the Re:G ISA virtual machine.
-
-Architecture:
-  - Warps of 32 lanes, executed in lockstep (SIMT)
-  - Per-lane general-purpose and floating-point register files
-  - Warp scheduler with round-robin arbitration across resident warps
-  - Divergence stack for branch reconvergence
-  - Scratchpad memory per core (software-managed, no cache coherence)
-  - Tensor units as asynchronous co-processors with busy/free state
-  - Explicit memory model: global memory + per-core scratchpad
 """
 
 from __future__ import annotations
@@ -17,24 +8,19 @@ from enum import IntEnum
 from typing import Optional
 import struct
 
-# ============================================================
-# ISA DEFINITION
-# ============================================================
-
 LANES = 32
 NUM_GP = 32
 NUM_FP = 32
 NUM_PRED = 8
 
+
 class Opcode(IntEnum):
     NOP      = 0x00
     HALT     = 0x01
-    # Memory
-    LDG      = 0x02   # Rd, [Ra + imm]      global load
-    STG      = 0x03   # [Ra + imm], Rd      global store
-    LDS      = 0x04   # Rd, [Ra + imm]      scratchpad load
-    STS      = 0x05   # [Ra + imm], Rd      scratchpad store
-    # Integer ALU
+    LDG      = 0x02
+    STG      = 0x03
+    LDS      = 0x04
+    STS      = 0x05
     MOV      = 0x06
     MOVI     = 0x07
     IADD     = 0x08
@@ -45,74 +31,54 @@ class Opcode(IntEnum):
     IXOR     = 0x0D
     SHL      = 0x0E
     SHR      = 0x0F
-    # FP ALU
     FADD     = 0x10
     FSUB     = 0x11
     FMUL     = 0x12
-    FFMA     = 0x13   # Fd = Fs * Ft + Fd
+    FFMA     = 0x13
     FMIN     = 0x14
     FMAX     = 0x15
-    # Conversion
     I2F      = 0x16
     F2I      = 0x17
-    # Predication
-    SETP     = 0x18   # Pd, Rs, Rt -> predicate
-    # Control flow
-    BRA      = 0x1A   # imm (PC-relative)
-    BRA_DIV  = 0x1B   # divergent branch (pushes reconvergence)
+    SETP     = 0x18
+    # 0x19 reserved (was @P in an earlier draft)
+    BRA      = 0x1A
+    BRA_DIV  = 0x1B
     RET      = 0x1C
-    # SIMT intrinsics
-    VOTE     = 0x1D   # warp vote (any/all/ballot)
-    SHFL     = 0x1E   # warp shuffle
-    # Tensor
-    TENSOR   = 0x1F   # async tensor op
-    # Special
+    VOTE     = 0x1D
+    SHFL     = 0x1E
+    TENSOR   = 0x1F
     SYSCALL  = 0x20
-    BAR      = 0x21   # warp barrier
+    BAR      = 0x21
 
-
-# 64-bit instruction encoding for SIMT (more room for operands)
-# [63:58] opcode (6 bits)
-# [57:53] rd (5)
-# [52:48] ra (5)
-# [47:43] rb (5)
-# [42:38] rc (5)
-# [37:33] pd (5) predicate dest
-# [32]    pred (1) instruction predicated?
-# [31:16] imm16 (16 signed)
-# [15:0]  imm16b (16, for second immediate or tensor config)
 
 def encode(op: Opcode, rd=0, ra=0, rb=0, rc=0, pd=0,
-           pred=False, imm=0, imm2=0) -> int:
+           pred=False, imm=0, imm2=0, pred_neg=False) -> int:
     return ((op & 0x3F) << 58) | ((rd & 0x1F) << 53) | ((ra & 0x1F) << 48) | \
            ((rb & 0x1F) << 43) | ((rc & 0x1F) << 38) | ((pd & 0x1F) << 33) | \
-           ((1 if pred else 0) << 32) | ((imm & 0xFFFF) << 16) | (imm2 & 0xFFFF)
+           ((1 if pred else 0) << 32) | ((1 if pred_neg else 0) << 31) | \
+           (((imm >> 0) & 0x7FFF) << 16) | (imm2 & 0xFFFF)
 
 
 def sext16(v: int) -> int:
     return v - 0x10000 if v & 0x8000 else v
 
 
-# ============================================================
-# WARP STATE
-# ============================================================
+def sext15(v: int) -> int:
+    return v - 0x8000 if v & 0x4000 else v
+
 
 @dataclass
 class Warp:
-    """A single warp of 32 SIMT lanes."""
     warp_id: int
     gp: list = field(default_factory=lambda: [[0] * LANES for _ in range(NUM_GP)])
     fp: list = field(default_factory=lambda: [[0.0] * LANES for _ in range(NUM_FP)])
     pred: list = field(default_factory=lambda: [True] * LANES)
     pc: int = 0
-    active_mask: int = 0xFFFFFFFF          # which lanes are alive
-    reconvergence: list = field(default_factory=list)  # divergence stack
-    state: str = "READY"                   # READY | RUNNING | WAITING | DONE
+    active_mask: int = 0xFFFFFFFF
+    reconvergence: list = field(default_factory=list)
+    state: str = "READY"
     wait_reason: str = ""
     cycles_run: int = 0
-
-    def __post_init__(self):
-        self.reconvergence = []
 
     def get_gp(self, reg: int, lane: int) -> int:
         return 0 if reg == 0 else self.gp[reg][lane]
@@ -131,37 +97,6 @@ class Warp:
         return [i for i in range(LANES) if (self.active_mask >> i) & 1]
 
 
-# ============================================================
-# SCRATCHPAD
-# ============================================================
-
-class Scratchpad:
-    """Per-core software-managed scratchpad memory."""
-    def __init__(self, size_bytes: int = 64 * 1024):
-        self.size = size_bytes
-        self.mem = bytearray(size_bytes)
-
-    def read(self, addr: int, size: int = 4, signed: bool = False) -> int:
-        addr &= (self.size - 1)
-        return int.from_bytes(self.mem[addr:addr + size], "little", signed=signed)
-
-    def write(self, addr: int, val: int, size: int = 4) -> None:
-        addr &= (self.size - 1)
-        self.mem[addr:addr + size] = (val & ((1 << (size * 8)) - 1)).to_bytes(size, "little")
-
-    def read_f(self, addr: int) -> float:
-        addr &= (self.size - 1)
-        return struct.unpack("<f", self.mem[addr:addr + 4])[0]
-
-    def write_f(self, addr: int, val: float) -> None:
-        addr &= (self.size - 1)
-        self.mem[addr:addr + 4] = struct.pack("<f", val)
-
-
-# ============================================================
-# TENSOR UNIT
-# ============================================================
-
 @dataclass
 class TensorUnit:
     busy_cycles: int = 0
@@ -179,43 +114,21 @@ class TensorUnit:
         return False
 
 
-# ============================================================
-# SIMT CORE
-# ============================================================
-
 class SIMTCore:
-    """
-    A SIMT execution core. Owns:
-      - a register file per warp (per-lane, per-register)
-      - a warp scheduler (round-robin across resident warps)
-      - a scratchpad
-      - tensor units (async)
-      - a global memory interface (shared with other cores via MemoryController)
-    """
-
     def __init__(self, core_id: int, num_warps: int = 16,
                  scratchpad_bytes: int = 64 * 1024,
                  num_tensor_units: int = 2,
-                 memory: "MemoryController | None" = None):
+                 memory=None):
+        from ram import Scratchpad, GlobalRAM
         self.core_id = core_id
-        self.warps: list[Warp] = []
+        self.warps: list[Warp] = [Warp(warp_id=i) for i in range(num_warps)]
         self.active_warps: list[int] = []
         self.scratchpad = Scratchpad(scratchpad_bytes)
         self.tensor_units = [TensorUnit() for _ in range(num_tensor_units)]
-        self.memory = memory or MemoryController()
-
-        self.pc = 0
+        self.memory = memory if memory is not None else GlobalRAM()
         self.cycles = 0
-        self.scheduler_rr = 0  # round-robin cursor
+        self.scheduler_rr = 0
         self.halted = False
-
-        for wid in range(num_warps):
-            w = Warp(warp_id=wid)
-            w.pc = 0
-            w.state = "READY"
-            self.warps.append(w)
-
-    # ---------- warp lifecycle ----------
 
     def launch_warp(self, warp_id: int, pc: int) -> None:
         w = self.warps[warp_id]
@@ -228,18 +141,14 @@ class SIMTCore:
             self.active_warps.append(warp_id)
 
     def retire_warp(self, warp_id: int) -> None:
-        w = self.warps[warp_id]
-        w.state = "DONE"
+        self.warps[warp_id].state = "DONE"
         if warp_id in self.active_warps:
             self.active_warps.remove(warp_id)
 
     def all_done(self) -> bool:
         return len(self.active_warps) == 0
 
-    # ---------- scheduler ----------
-
     def next_warp(self) -> Optional[Warp]:
-        """Round-robin across ready warps. Skip WAITING/DONE."""
         n = len(self.active_warps)
         if n == 0:
             return None
@@ -251,20 +160,15 @@ class SIMTCore:
                 return w
         return None
 
-    # ---------- execution ----------
-
     def step(self) -> int:
-        """Execute one warp-instruction. Returns number of warp-instructions issued."""
         w = self.next_warp()
         if w is None:
             return 0
-
         w.state = "RUNNING"
         self._issue(w)
         w.cycles_run += 1
         self.cycles += 1
 
-        # Tick tensor units
         for i, tu in enumerate(self.tensor_units):
             if tu.tick():
                 if tu.dest_warp >= 0:
@@ -280,10 +184,10 @@ class SIMTCore:
         return 1
 
     def _issue(self, w: Warp) -> None:
-        if w.pc + 7 >= self.memory.SIZE:
+        if w.pc + 7 >= self.memory.SIZE: 
             raise RuntimeError(f"warp {w.warp_id}: PC out of bounds {w.pc:#x}")
 
-        word = self.memory.read_global_u64(w.pc) # type: ignore
+        word = self.memory.read_u64(w.pc)
         w.pc += 8
 
         op = (word >> 58) & 0x3F
@@ -293,22 +197,25 @@ class SIMTCore:
         rc = (word >> 38) & 0x1F
         pd = (word >> 33) & 0x1F
         pred_bit = (word >> 32) & 1
-        imm = sext16((word >> 16) & 0xFFFF)
+        pred_neg = (word >> 31) & 1
+        imm = sext15((word >> 16) & 0x7FFF)
         imm2 = word & 0xFFFF
 
         try:
             opcode = Opcode(op)
         except ValueError:
-            raise RuntimeError(f"warp {w.warp_id}: invalid opcode {op:#x} at pc={w.pc-8:#x}")
+            raise RuntimeError(
+                f"warp {w.warp_id}: invalid opcode {op:#x} at pc={w.pc-8:#x}")
 
         lanes = w.active_lanes()
         if not lanes:
             return
 
-        # Predicate masking: if instruction is predicated, only execute on lanes
-        # whose predicate is True. Others are masked off for this instruction.
-        if pred_bit and pd != 0xFF:
-            exec_lanes = [l for l in lanes if w.pred[l]]
+        if pred_bit:
+            if pred_neg:
+                exec_lanes = [l for l in lanes if not w.pred[l]]
+            else:
+                exec_lanes = [l for l in lanes if w.pred[l]]
             if not exec_lanes:
                 return
         else:
@@ -320,20 +227,16 @@ class SIMTCore:
             self.retire_warp(w.warp_id)
         elif opcode == Opcode.LDG:
             for l in exec_lanes:
-                addr = w.get_gp(ra, l) + imm
-                w.set_gp(rd, l, self.memory.read_u32(addr))
+                w.set_gp(rd, l, self.memory.read_u32(w.get_gp(ra, l) + imm))
         elif opcode == Opcode.STG:
             for l in exec_lanes:
-                addr = w.get_gp(ra, l) + imm
-                self.memory.write_u32(addr, w.get_gp(rd, l))
+                self.memory.write_u32(w.get_gp(ra, l) + imm, w.get_gp(rd, l))
         elif opcode == Opcode.LDS:
             for l in exec_lanes:
-                addr = w.get_gp(ra, l) + imm
-                w.set_gp(rd, l, self.scratchpad.read(addr))
+                w.set_gp(rd, l, self.scratchpad.read_u32(w.get_gp(ra, l) + imm))
         elif opcode == Opcode.STS:
             for l in exec_lanes:
-                addr = w.get_gp(ra, l) + imm
-                self.scratchpad.write(addr, w.get_gp(rd, l))
+                self.scratchpad.write_u32(w.get_gp(ra, l) + imm, w.get_gp(rd, l))
         elif opcode == Opcode.MOV:
             for l in exec_lanes:
                 w.set_gp(rd, l, w.get_gp(ra, l))
@@ -390,49 +293,47 @@ class SIMTCore:
                 w.set_gp(rd, l, int(w.get_fp(ra, l)))
         elif opcode == Opcode.SETP:
             for l in exec_lanes:
-                w.pred[pd] = (w.get_gp(ra, l) < w.get_gp(rb, l)) if imm == 0 else \
-                             (w.get_gp(ra, l) == w.get_gp(rb, l)) if imm == 1 else \
-                             (w.get_gp(ra, l) != w.get_gp(rb, l)) if imm == 2 else True
+                if imm == 0:
+                    w.pred[pd] = w.get_gp(ra, l) < w.get_gp(rb, l)
+                elif imm == 1:
+                    w.pred[pd] = w.get_gp(ra, l) == w.get_gp(rb, l)
+                elif imm == 2:
+                    w.pred[pd] = w.get_gp(ra, l) != w.get_gp(rb, l)
+                else:
+                    w.pred[pd] = True
         elif opcode == Opcode.BRA:
-            # Warp-uniform branch (no divergence)
             if all(w.pred[l] for l in exec_lanes):
                 w.pc = (w.pc + (imm << 3)) & 0xFFFFFFFF
         elif opcode == Opcode.BRA_DIV:
-            # Divergent branch: push reconvergence, execute one path now,
-            # schedule the other later.
             taken = [l for l in exec_lanes if w.pred[l]]
             not_taken = [l for l in exec_lanes if not w.pred[l]]
             if not taken:
-                pass  # fall through
+                pass
             elif not not_taken:
                 w.pc = (w.pc + (imm << 3)) & 0xFFFFFFFF
             else:
-                # Push the fall-through path for later, take the branch now
-                reconv = w.pc  # fall-through
-                w.reconvergence.append((reconv, not_taken))
+                w.reconvergence.append((w.pc, not_taken))
                 w.active_mask = sum(1 << l for l in taken)
                 w.pc = (w.pc + (imm << 3)) & 0xFFFFFFFF
         elif opcode == Opcode.RET:
             self.retire_warp(w.warp_id)
         elif opcode == Opcode.VOTE:
-            # warp vote: all/any/ballot into rd for each lane
             mask = 0
             for l in exec_lanes:
                 if w.pred[l]:
                     mask |= (1 << l)
-            if imm == 0:  # ballot
+            if imm == 0:
                 for l in exec_lanes:
                     w.set_gp(rd, l, mask)
-            elif imm == 1:  # any
-                val = 1 if mask else 0
+            elif imm == 1:
+                v = 1 if mask else 0
                 for l in exec_lanes:
-                    w.set_gp(rd, l, val)
-            elif imm == 2:  # all
-                val = 1 if mask == w.active_mask else 0
+                    w.set_gp(rd, l, v)
+            elif imm == 2:
+                v = 1 if mask == w.active_mask else 0
                 for l in exec_lanes:
-                    w.set_gp(rd, l, val)
+                    w.set_gp(rd, l, v)
         elif opcode == Opcode.SHFL:
-            # warp shuffle: rd[l] = ra[src_lane]
             src = imm & 0x1F
             for l in exec_lanes:
                 w.set_gp(rd, l, w.get_gp(ra, src))
@@ -444,14 +345,13 @@ class SIMTCore:
             if tu.is_busy():
                 w.state = "WAITING"
                 w.wait_reason = f"tensor{unit}"
-                w.pc -= 8  # re-issue when ready
+                w.pc -= 8
                 return
             tu.busy_cycles = 4
             tu.dest_fp = rd
             tu.dest_warp = w.warp_id
             tu.result = w.get_fp(ra, exec_lanes[0]) * w.get_fp(rb, exec_lanes[0])
         elif opcode == Opcode.BAR:
-            # warp barrier: no-op in this simplified model
             pass
         elif opcode == Opcode.SYSCALL:
             if imm == 1:
@@ -463,8 +363,6 @@ class SIMTCore:
         else:
             raise RuntimeError(f"warp {w.warp_id}: unhandled {opcode.name}")
 
-        # Reconvergence: if this warp is at the reconvergence PC and has
-        # a pending path, restore it.
         if w.reconvergence and w.pc == w.reconvergence[-1][0]:
             reconv_pc, pending = w.reconvergence.pop()
             w.active_mask |= sum(1 << l for l in pending)
@@ -476,65 +374,3 @@ class SIMTCore:
         if self.cycles >= max_cycles:
             raise RuntimeError(f"max cycles ({max_cycles}) exceeded")
         return self.cycles
-
-
-# ============================================================
-# GLOBAL MEMORY (shared across cores)
-# ============================================================
-
-class MemoryController:
-    SIZE = 1 << 24  # 16 MiB global
-
-    def __init__(self):
-        self.mem = bytearray(self.SIZE)
-
-    def read_u32(self, addr: int) -> int:
-        addr &= (self.SIZE - 1)
-        return int.from_bytes(self.mem[addr:addr + 4], "little")
-
-    def write_u32(self, addr: int, val: int) -> None:
-        addr &= (self.SIZE - 1)
-        self.mem[addr:addr + 4] = (val & 0xFFFFFFFF).to_bytes(4, "little")
-
-    def read_u64(self, addr: int) -> int:
-        addr &= (self.SIZE - 1)
-        return int.from_bytes(self.mem[addr:addr + 8], "little")
-
-    def write_u64(self, addr: int, val: int) -> None:
-        addr &= (self.SIZE - 1)
-        self.mem[addr:addr + 8] = (val & 0xFFFFFFFFFFFFFFFF).to_bytes(8, "little")
-
-    def read_f32(self, addr: int) -> float:
-        addr &= (self.SIZE - 1)
-        return struct.unpack("<f", self.mem[addr:addr + 4])[0]
-
-    def write_f32(self, addr: int, val: float) -> None:
-        addr &= (self.SIZE - 1)
-        self.mem[addr:addr + 4] = struct.pack("<f", val)
-
-    def load(self, data: bytes, addr: int = 0) -> None:
-        addr &= (self.SIZE - 1)
-        self.mem[addr:addr + len(data)] = data
-
-
-# ============================================================
-# SMOKE TEST
-# ============================================================
-
-if __name__ == "__main__":
-    print("SIMT core smoke test")
-    mem = MemoryController()
-    core = SIMTCore(core_id=0, num_warps=4, memory=mem)
-
-    # Program: for each lane l, compute l * 2 + 1 into gp1, then halt.
-    # We encode a few instructions at addr 0.
-    prog = [
-        encode(Opcode.MOV, rd=1, ra=0, imm=1),      # not used
-        encode(Opcode.HALT),
-    ]
-    for i, w in enumerate(prog):
-        mem.write_u64(i * 8, w)
-
-    core.launch_warp(0, 0)
-    cycles = core.run(max_cycles=1000)
-    print(f"warp 0 retired after {cycles} cycles, state={core.warps[0].state}")

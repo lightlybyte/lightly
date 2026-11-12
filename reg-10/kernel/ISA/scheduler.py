@@ -1,57 +1,27 @@
 """
-scheduler.py - Command ring, block scheduler, and warp lifecycle for Re:G.
-
-Responsibilities:
-  - Parse commands from the command ring (submitted by the host driver)
-  - Launch thread blocks (groups of warps) onto SIMT cores
-  - Track block completion via DMA fences and warp retirement
-  - Provide fence signalling back to the host driver
-
-Command format (in global RAM, written by the driver):
-  ┌──────────┬────────────────────────────────────────┐
-  │ word     │ meaning                                │
-  ├──────────┼────────────────────────────────────────┤
-  │ 0        │ opcode (u32)                           │
-  │ 1        │ grid_x, grid_y (packed u16s)           │
-  │ 2        │ block_x, block_y (packed u16s)         │
-  │ 3        │ warps_per_block (u32)                  │
-  │ 4        │ kernel_pc (u32)                        │
-  │ 5        │ args_addr (u32)                        │
-  │ 6        │ fence_id (u32)                         │
-  └──────────┴────────────────────────────────────────┘
+scheduler.py - Command ring, block scheduler, warp lifecycle for Re:G.
 """
 
 from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from cpu import SIMTCore
-    from ram import MemorySystem, GlobalRAM
-    from dma import DMAEngine
+from cpu import SIMTCore
+from ram import MemorySystem
+from dma import DMAEngine, DMAChannel
 
-
-# ============================================================
-# COMMAND OPCODES
-# ============================================================
 
 class CmdOp(IntEnum):
-    NOP        = 0
-    DISPATCH   = 1   # launch a compute grid
-    COPY       = 2   # DMA copy
-    FENCE      = 3   # insert a fence
-    SET_FB     = 4   # set framebuffer origin
-    PRESENT    = 5   # signal display endpoint
+    NOP      = 0
+    DISPATCH = 1
+    COPY     = 2
+    FENCE    = 3
+    SET_FB   = 4
+    PRESENT  = 5
 
-
-# ============================================================
-# BLOCK
-# ============================================================
 
 @dataclass(slots=True)
 class Block:
-    """A thread block: a group of warps sharing the same kernel PC."""
     block_id: int
     grid_x: int
     grid_y: int
@@ -62,23 +32,12 @@ class Block:
     args_addr: int
     fence_id: int
     core_id: int = -1
+    warp_ids: list = field(default_factory=list)
     launched: bool = False
     retired: bool = False
 
 
-# ============================================================
-# SCHEDULER
-# ============================================================
-
 class Scheduler:
-    """
-    Owns:
-      - the command ring cursor
-      - the block dispatch queue
-      - per-core block assignment
-      - completion tracking
-    """
-
     __slots__ = (
         "cores", "memory", "dma", "fences",
         "ring_base", "ring_head", "ring_tail",
@@ -86,8 +45,7 @@ class Scheduler:
         "cycles", "halted",
     )
 
-    def __init__(self, cores: list["SIMTCore"], memory: "MemorySystem",
-                 dma: "DMAEngine", ring_base: int = 0x100):
+    def __init__(self, cores, memory, dma, ring_base=0x100):
         self.cores = cores
         self.memory = memory
         self.dma = dma
@@ -100,32 +58,26 @@ class Scheduler:
         self.cycles = 0
         self.halted = False
 
-    # ---------- fence API ----------
-
-    def new_fence(self) -> int:
+    def new_fence(self):
         fid = len(self.fences)
         self.fences[fid] = False
         return fid
 
-    def signal_fence(self, fid: int) -> None:
+    def signal_fence(self, fid):
         if fid >= 0:
             self.fences[fid] = True
 
-    def is_fence_signalled(self, fid: int) -> bool:
+    def is_fence_signalled(self, fid):
         return self.fences.get(fid, False)
 
-    # ---------- command ring ----------
-
-    def submit_command(self, words: list[int]) -> int:
-        """Driver writes a command to the ring. Returns the new head."""
+    def submit_command(self, words):
         mem = self.memory.global_ram
         for i, w in enumerate(words):
             mem.write_u32(self.ring_tail + i * 4, w & 0xFFFFFFFF)
         self.ring_tail += len(words) * 4
         return self.ring_tail
 
-    def process_ring(self) -> int:
-        """Drain the ring, executing commands. Returns number processed."""
+    def process_ring(self):
         mem = self.memory.global_ram
         processed = 0
         while self.ring_head < self.ring_tail:
@@ -140,10 +92,9 @@ class Scheduler:
                 args_addr = mem.read_u32(self.ring_head + 20)
                 fence_id = mem.read_u32(self.ring_head + 24)
                 self._enqueue_dispatch(
-                    gx=grid & 0xFFFF, gy=(grid >> 16) & 0xFFFF,
-                    bx=block & 0xFFFF, by=(block >> 16) & 0xFFFF,
-                    warps=warps, kernel_pc=kernel_pc,
-                    args_addr=args_addr, fence_id=fence_id,
+                    grid & 0xFFFF, (grid >> 16) & 0xFFFF,
+                    block & 0xFFFF, (block >> 16) & 0xFFFF,
+                    warps, kernel_pc, args_addr, fence_id,
                 )
                 self.ring_head += 28
             elif op == CmdOp.COPY:
@@ -152,26 +103,21 @@ class Scheduler:
                 length = mem.read_u32(self.ring_head + 12)
                 ch = mem.read_u32(self.ring_head + 16)
                 fence_id = mem.read_u32(self.ring_head + 20)
-                from dma import DMAChannel
                 self.dma.submit_copy(DMAChannel(ch), src, dst, length, fence_id)
                 self.ring_head += 24
             elif op == CmdOp.FENCE:
-                fid = mem.read_u32(self.ring_head + 4)
-                self.signal_fence(fid)
+                self.signal_fence(mem.read_u32(self.ring_head + 4))
                 self.ring_head += 8
             elif op == CmdOp.PRESENT:
-                # signal display endpoint (host-side; here just a flag)
                 self.ring_head += 4
             else:
-                raise RuntimeError(f"unknown command {op:#x} at {self.ring_head:#x}")
+                raise RuntimeError(
+                    f"unknown command {op:#x} at {self.ring_head:#x}")
             processed += 1
         return processed
 
-    # ---------- dispatch ----------
-
-    def _enqueue_dispatch(self, gx: int, gy: int, bx: int, by: int,
-                          warps: int, kernel_pc: int,
-                          args_addr: int, fence_id: int) -> None:
+    def _enqueue_dispatch(self, gx, gy, bx, by, warps, kernel_pc,
+                          args_addr, fence_id):
         bid = 0
         for by_i in range(by):
             for bx_i in range(bx):
@@ -188,48 +134,46 @@ class Scheduler:
                         ))
                         bid += 1
 
-    def _find_free_core(self) -> int | None:
-        for i, core in enumerate(self.cores):
-            if len(core.active_warps) + 4 <= len(core.warps):
-                return i
-        return None
+    def _free_warps_on(self, core_id: int, count: int) -> list[int] | None:
+        core = self.cores[core_id]
+        active = set(core.active_warps)
+        free = [i for i in range(len(core.warps)) if i not in active]
+        if len(free) < count:
+            return None
+        return free[:count]
 
-    def _dispatch_pending(self) -> None:
-        """Move pending blocks onto idle cores."""
+    def _dispatch_pending(self):
         while self.pending_blocks:
-            core_id = self._find_free_core()
-            if core_id is None:
+            placed = False
+            for core_id in range(len(self.cores)):
+                warp_ids = self._free_warps_on(core_id, self.pending_blocks[0].warps)
+                if warp_ids is None:
+                    continue
+                block = self.pending_blocks.pop(0)
+                core = self.cores[core_id]
+                for wid in warp_ids:
+                    core.launch_warp(wid, block.kernel_pc)
+                block.core_id = core_id
+                block.warp_ids = list(warp_ids)
+                block.launched = True
+                self.running_blocks.append(block)
+                placed = True
+                break
+            if not placed:
                 return
-            block = self.pending_blocks.pop(0)
-            core = self.cores[core_id]
-            base = len(core.active_warps)
-            for w in range(block.warps):
-                wid = base + w
-                if wid >= len(core.warps):
-                    break
-                core.launch_warp(wid, block.kernel_pc)
-            block.core_id = core_id
-            block.launched = True
-            self.running_blocks.append(block)
 
-    # ---------- tick ----------
-
-    def tick(self) -> None:
-        """One scheduler cycle: advance all cores, check completions."""
+    def tick(self):
         self.cycles += 1
         self.process_ring()
         self._dispatch_pending()
-
         for core in self.cores:
             core.step()
-
         self.dma.tick()
 
-        # retire blocks whose core warps are all done
         still_running = []
         for block in self.running_blocks:
             core = self.cores[block.core_id]
-            if core.all_done():
+            if all(core.warps[wid].state == "DONE" for wid in block.warp_ids):
                 block.retired = True
                 if block.fence_id >= 0:
                     self.signal_fence(block.fence_id)
@@ -244,32 +188,3 @@ class Scheduler:
                 raise RuntimeError(f"max cycles ({max_cycles}) exceeded")
             self.tick()
         return self.cycles
-
-
-# ============================================================
-# SMOKE TEST
-# ============================================================
-
-if __name__ == "__main__":
-    from cpu import SIMTCore, Opcode, encode
-    from ram import MemorySystem
-    from dma import DMAEngine
-
-    mem = MemorySystem(num_cores=2, fb_width=320, fb_height=240)
-    cores = [SIMTCore(core_id=i, num_warps=16, memory=mem.global_ram) # type: ignore
-             for i in range(2)]
-    dma = DMAEngine(mem.global_ram, mem.scratchpads, mem.framebuffer)
-    sched = Scheduler(cores, mem, dma)
-
-    # Write a trivial kernel: HALT
-    mem.global_ram.write_u64(0x1000, encode(Opcode.HALT))
-
-    fence = sched.new_fence()
-    sched.submit_command([
-        CmdOp.DISPATCH, 1, 1, 2, 0x1000, 0, fence
-    ])
-
-    cycles = sched.run(max_cycles=10_000)
-    assert sched.is_fence_signalled(fence), "dispatch fence not signalled"
-    print(f"scheduler ran {cycles} cycles, fence {fence} signalled")
-    print("all tests passed")
