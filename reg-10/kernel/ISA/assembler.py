@@ -1,15 +1,13 @@
 """
 assembler.py - Two-pass assembler for the Re:G SIMT ISA, with optimizer.
 
-CLI:
-  python assembler.py kernel.s
-  python assembler.py kernel.s --run --screen
+Adds immediate forms: ADDI, SUBI, MULI, ANDI, ORI, XORI, SHLI, SHRI.
 """
 
 from __future__ import annotations
 import argparse
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from cpu import Opcode, encode
 
@@ -42,7 +40,7 @@ class Instr:
     is_label_only: bool = False
 
 
-def strip_comment(line: str) -> str:
+def strip_comment(line):
     in_str = False
     for i, ch in enumerate(line):
         if ch == '"':
@@ -52,7 +50,7 @@ def strip_comment(line: str) -> str:
     return line
 
 
-def parse_line(line: str, line_no: int) -> ParsedLine | None:
+def parse_line(line, line_no):
     line = strip_comment(line).strip()
     if not line:
         return None
@@ -76,7 +74,7 @@ def parse_line(line: str, line_no: int) -> ParsedLine | None:
                       pred=pred, pred_neg=pred_neg)
 
 
-def reg_index(tok: str, prefix: str) -> int:
+def reg_index(tok, prefix):
     if not tok or tok[0] != prefix:
         raise ValueError(f"expected {prefix}N, got {tok!r}")
     n = int(tok[1:])
@@ -85,7 +83,7 @@ def reg_index(tok: str, prefix: str) -> int:
     return n
 
 
-def imm_value(tok: str) -> int:
+def imm_value(tok):
     return int(tok, 0)
 
 
@@ -106,8 +104,14 @@ INSTR_FORMATS = {
     "IXOR":   (Opcode.IXOR,   "RRR"),
     "SHL":    (Opcode.SHL,    "RRR"),
     "SHR":    (Opcode.SHR,    "RRR"),
-    "SHLI":   (Opcode.SHL,    "RRI"),   # NEW: shift left by immediate
-    "SHRI":   (Opcode.SHR,    "RRI"),   # NEW: shift right by immediate
+    "ADDI":   (Opcode.IADD,   "RRI"),
+    "SUBI":   (Opcode.ISUB,   "RRI"),
+    "MULI":   (Opcode.IMUL,   "RRI"),
+    "ANDI":   (Opcode.IAND,   "RRI"),
+    "ORI":    (Opcode.IOR,    "RRI"),
+    "XORI":   (Opcode.IXOR,   "RRI"),
+    "SHLI":   (Opcode.SHL,    "RRI"),
+    "SHRI":   (Opcode.SHR,    "RRI"),
     "FADD":   (Opcode.FADD,   "RRR"),
     "FSUB":   (Opcode.FSUB,   "RRR"),
     "FMUL":   (Opcode.FMUL,   "RRR"),
@@ -127,14 +131,10 @@ INSTR_FORMATS = {
     "SYSCALL":(Opcode.SYSCALL,"RI"),
 }
 
-BRANCHES = {"BRA", "BRA_DIV"}
-TERMINATORS = {"HALT", "RET"}
-INT_ALU = {"IADD", "ISUB", "IMUL", "IAND", "IOR", "IXOR", "SHL", "SHR"}
-
 
 class Assembler:
     def __init__(self, optimize: bool = True):
-        self.labels: dict[str, int] = {}
+        self.labels = {}
         self.pc = 0
         self.org = 0
         self.optimize = optimize
@@ -142,28 +142,28 @@ class Assembler:
     def assemble(self, source: str) -> bytes:
         instrs = self._parse_and_flatten(source)
         if self.optimize:
-            instrs = optimize_program(instrs)
+            instrs = _eliminate_unreachable(instrs)
+            instrs = _eliminate_mov_self(instrs)
+            instrs = _eliminate_nop(instrs)
         self._assign_labels(instrs)
         self._encode_all(instrs)
         return self._emit(instrs)
 
-    def _parse_and_flatten(self, source: str) -> list[Instr]:
+    def _parse_and_flatten(self, source):
         parsed = [parse_line(r, i) for i, r in enumerate(source.splitlines(), 1)]
         parsed = [p for p in parsed if p]
-        instrs: list[Instr] = []
+        instrs = []
         for p in parsed:
             if p.mnemonic is None:
-                instrs.append(Instr(
-                    mnemonic="", operands=[], line_no=p.line_no,
-                    label=p.label, is_label_only=True))
-                continue
-            instrs.append(Instr(
-                mnemonic=p.mnemonic, operands=p.operands,
-                line_no=p.line_no, pred=p.pred,
-                pred_neg=p.pred_neg, label=p.label))
+                instrs.append(Instr(mnemonic="", operands=[], line_no=p.line_no,
+                                    label=p.label, is_label_only=True))
+            else:
+                instrs.append(Instr(mnemonic=p.mnemonic, operands=p.operands,
+                                    line_no=p.line_no, pred=p.pred,
+                                    pred_neg=p.pred_neg, label=p.label))
         return instrs
 
-    def _assign_labels(self, instrs: list[Instr]) -> None:
+    def _assign_labels(self, instrs):
         self.labels = {}
         pc = self.org
         for ins in instrs:
@@ -182,7 +182,7 @@ class Assembler:
             elif ins.mnemonic and not ins.mnemonic.startswith('.'):
                 pc += 8
 
-    def _encode_all(self, instrs: list[Instr]) -> None:
+    def _encode_all(self, instrs):
         pc = self.org
         for ins in instrs:
             if ins.is_label_only:
@@ -203,7 +203,7 @@ class Assembler:
                 self._encode_instruction(ins, pc)
                 pc += 8
 
-    def _encode_instruction(self, ins: Instr, pc: int) -> None:
+    def _encode_instruction(self, ins, pc):
         if ins.mnemonic not in INSTR_FORMATS:
             raise SyntaxError(
                 f"line {ins.line_no}: unknown mnemonic {ins.mnemonic!r}")
@@ -241,7 +241,7 @@ class Assembler:
         ins.rd, ins.ra, ins.rb, ins.rc, ins.pd = rd, ra, rb, rc, pd
         ins.imm = imm
 
-    def _emit(self, instrs: list[Instr]) -> bytes:
+    def _emit(self, instrs):
         out = bytearray()
         pc = self.org
         for ins in instrs:
@@ -264,36 +264,18 @@ class Assembler:
                 out += b"\x00" * (8 * ins.imm)
                 pc += 8 * ins.imm
             elif ins.mnemonic and not ins.mnemonic.startswith('.'):
-                word = encode(
-                    ins.op, ins.rd, ins.ra, ins.rb, ins.rc, ins.pd,
-                    pred=(ins.pred != 0xFF), pred_neg=ins.pred_neg,
-                    imm=ins.imm,
-                )
+                word = encode(ins.op, ins.rd, ins.ra, ins.rb, ins.rc, ins.pd,
+                              pred=(ins.pred != 0xFF), pred_neg=ins.pred_neg,
+                              imm=ins.imm)
                 out += word.to_bytes(8, "little")
                 pc += 8
         return bytes(out)
 
 
-# ============================================================
-# OPTIMIZER
-# ============================================================
-
-def optimize_program(instrs: list[Instr]) -> list[Instr]:
-    changed = True
-    while changed:
-        before = len(instrs)
-        instrs = _eliminate_unreachable(instrs)
-        instrs = _eliminate_mov_self(instrs)
-        instrs = _eliminate_branch_to_next(instrs)
-        instrs = _eliminate_nop(instrs)
-        changed = len(instrs) != before
-    return instrs
-
-
-def _eliminate_unreachable(instrs: list[Instr]) -> list[Instr]:
+def _eliminate_unreachable(instrs):
     targets = set()
     for ins in instrs:
-        if ins.mnemonic in BRANCHES and ins.operands:
+        if ins.mnemonic in {"BRA", "BRA_DIV"} and ins.operands:
             targets.add(ins.operands[0])
     out = []
     reachable = True
@@ -308,54 +290,25 @@ def _eliminate_unreachable(instrs: list[Instr]) -> list[Instr]:
         if not reachable:
             continue
         out.append(ins)
-        if ins.mnemonic in TERMINATORS or ins.mnemonic in BRANCHES:
+        if ins.mnemonic in {"HALT", "RET", "BRA", "BRA_DIV"}:
             reachable = False
     return out
 
 
-def _eliminate_mov_self(instrs: list[Instr]) -> list[Instr]:
-    return [
-        ins for ins in instrs
-        if not (ins.mnemonic == "MOV" and len(ins.operands) == 2
-                and ins.operands[0] == ins.operands[1])
-    ]
+def _eliminate_mov_self(instrs):
+    return [ins for ins in instrs
+            if not (ins.mnemonic == "MOV" and len(ins.operands) == 2
+                    and ins.operands[0] == ins.operands[1])]
 
 
-def _eliminate_branch_to_next(instrs: list[Instr]) -> list[Instr]:
-    out = []
-    for i, ins in enumerate(instrs):
-        if ins.mnemonic in BRANCHES and ins.operands:
-            target = ins.operands[0]
-            j = i + 1
-            skip = False
-            while j < len(instrs):
-                if instrs[j].label == target:
-                    skip = True
-                    break
-                if instrs[j].mnemonic not in (".org", ".word", ".fill"):
-                    break
-                j += 1
-            if skip:
-                continue
-        out.append(ins)
-    return out
+def _eliminate_nop(instrs):
+    return [ins for ins in instrs
+            if not (ins.mnemonic == "NOP" and not ins.label)]
 
-
-def _eliminate_nop(instrs: list[Instr]) -> list[Instr]:
-    return [ins for ins in instrs if not (ins.mnemonic == "NOP" and not ins.label)]
-
-
-# ============================================================
-# PUBLIC
-# ============================================================
 
 def assemble(source: str, optimize: bool = True) -> bytes:
     return Assembler(optimize=optimize).assemble(source)
 
-
-# ============================================================
-# RUNNER
-# ============================================================
 
 def run_program(code, fb_w, fb_h, origin=0x1000, max_cycles=10_000_000):
     from ram import MemorySystem
@@ -376,10 +329,6 @@ def run_program(code, fb_w, fb_h, origin=0x1000, max_cycles=10_000_000):
     print(f"fence {fence} signalled: {sched.is_fence_signalled(fence)}")
     return mem
 
-
-# ============================================================
-# CLI
-# ============================================================
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Re:G assembler")

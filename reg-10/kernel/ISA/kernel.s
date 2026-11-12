@@ -1,51 +1,63 @@
-; kernel.s - Re:G gradient test kernel
-; Writes a gradient into the framebuffer region at 0x10000.
-; Assumes 320x240 framebuffer, BGRA8, stride 1280 bytes.
+; kernel.s - gradient fill
+;
+; Registers:
+;   r1  = x_base         r2  = y
+;   r10 = fb_base        r11 = lane index
+;   r12 = constant 1     r13 = width (320)
+;   r14 = height (240)   r15 = x
+;   r16 = color          r17 = scratch
+;   r18 = lane table base (0x200)
+;   r19 = scratch        r20 = lane counter
+;   r21 = lane pointer   r22 = lane limit
 
         .org 0x1000
 
 start:
-        MOVI  r10, 0x10000      ; framebuffer base
-        MOVI  r1, 0             ; y = 0
+        MOVI  r10, 0x10000
+        MOVI  r12, 1
+        MOVI  r13, 320
+        MOVI  r14, 240
+        MOVI  r18, 0x200
 
+        ; write lane indices 0..31 to 0x200..0x27C
+        MOVI  r20, 0
+        MOV   r21, r18
+        MOVI  r22, 32
+lane_init:
+        STG   r20, r21, 0
+        ADDI  r21, r21, 4
+        ADDI  r20, r20, 1
+        SETP  p0, r20, r22
+        @P0   BRA lane_init
+
+        MOVI  r2, 0
 yloop:
-        MOVI  r2, 0             ; x = 0
-
+        MOVI  r1, 0
 xloop:
-        ; color = 0xFF000000 | (y << 8) | x
-        SHL   r3, r1, 8         ; r3 = y << 8
-        IOR   r3, r3, r2        ; r3 = (y << 8) | x
-        MOVI  r4, 0xFF000000    ; note: imm is 15-bit; use shift to build
-        ; Rebuild 0xFF000000 as (0xFF << 24). 0xFF fits in imm.
-        MOVI  r4, 0xFF
-        SHL   r4, r4, 24        ; r4 = 0xFF000000
-        IOR   r3, r3, r4        ; r3 = 0xFF000000 | (y<<8) | x
+        LDG   r11, r18, 0
+        IADD  r15, r1, r11
 
-        ; offset = (y * 320 + x) * 4
-        MOVI  r5, 320
-        IMUL  r6, r1, r5        ; r6 = y * 320
-        IADD  r6, r6, r2        ; r6 = y*320 + x
-        SHL   r6, r6, 2         ; r6 = offset in bytes
+        MOVI  r19, 0xFF
+        IAND  r16, r15, r19
+        IAND  r17, r2, r19
+        SHLI  r17, r17, 16
+        IOR   r16, r16, r17
+        MOVI  r17, 0xFF8080
+        IOR   r16, r16, r17
 
-        IADD  r7, r10, r6       ; r7 = framebuffer address
-        STG   r3, r7, 0         ; store pixel
+        MOVI  r19, 1280
+        IMUL  r17, r2, r19
+        SHLI  r19, r15, 2
+        IADD  r17, r17, r19
+        IADD  r17, r10, r17
+        STG   r16, r17, 0
 
-        ; x++
-        MOVI  r8, 1
-        IADD  r2, r2, r8
-
-        ; if x < 320 goto xloop
-        MOVI  r9, 320
-        SETP  p0, r2, r9, 0     ; p0 = (r2 < r9)
+        ADDI  r1, r1, 32
+        SETP  p0, r1, r13
         @P0   BRA xloop
 
-        ; y++
-        MOVI  r8, 1
-        IADD  r1, r1, r8
-
-        ; if y < 240 goto yloop
-        MOVI  r9, 240
-        SETP  p0, r1, r9, 0     ; p0 = (r1 < r9)
+        ADDI  r2, r2, 1
+        SETP  p0, r2, r14
         @P0   BRA yloop
 
         HALT

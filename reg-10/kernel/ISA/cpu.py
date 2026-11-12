@@ -40,7 +40,6 @@ class Opcode(IntEnum):
     I2F      = 0x16
     F2I      = 0x17
     SETP     = 0x18
-    # 0x19 reserved (was @P in an earlier draft)
     BRA      = 0x1A
     BRA_DIV  = 0x1B
     RET      = 0x1C
@@ -57,10 +56,6 @@ def encode(op: Opcode, rd=0, ra=0, rb=0, rc=0, pd=0,
            ((rb & 0x1F) << 43) | ((rc & 0x1F) << 38) | ((pd & 0x1F) << 33) | \
            ((1 if pred else 0) << 32) | ((1 if pred_neg else 0) << 31) | \
            (((imm >> 0) & 0x7FFF) << 16) | (imm2 & 0xFFFF)
-
-
-def sext16(v: int) -> int:
-    return v - 0x10000 if v & 0x8000 else v
 
 
 def sext15(v: int) -> int:
@@ -184,7 +179,7 @@ class SIMTCore:
         return 1
 
     def _issue(self, w: Warp) -> None:
-        if w.pc + 7 >= self.memory.SIZE: 
+        if w.pc + 7 >= self.memory.SIZE:
             raise RuntimeError(f"warp {w.warp_id}: PC out of bounds {w.pc:#x}")
 
         word = self.memory.read_u64(w.pc)
@@ -221,6 +216,9 @@ class SIMTCore:
         else:
             exec_lanes = lanes
 
+        def b_of(l):
+            return w.get_gp(rb, l) if rb != 0 else imm
+
         if opcode == Opcode.NOP:
             pass
         elif opcode == Opcode.HALT:
@@ -245,28 +243,28 @@ class SIMTCore:
                 w.set_gp(rd, l, imm & 0xFFFFFFFF)
         elif opcode == Opcode.IADD:
             for l in exec_lanes:
-                w.set_gp(rd, l, w.get_gp(ra, l) + w.get_gp(rb, l))
+                w.set_gp(rd, l, w.get_gp(ra, l) + b_of(l))
         elif opcode == Opcode.ISUB:
             for l in exec_lanes:
-                w.set_gp(rd, l, w.get_gp(ra, l) - w.get_gp(rb, l))
+                w.set_gp(rd, l, w.get_gp(ra, l) - b_of(l))
         elif opcode == Opcode.IMUL:
             for l in exec_lanes:
-                w.set_gp(rd, l, w.get_gp(ra, l) * w.get_gp(rb, l))
+                w.set_gp(rd, l, w.get_gp(ra, l) * b_of(l))
         elif opcode == Opcode.IAND:
             for l in exec_lanes:
-                w.set_gp(rd, l, w.get_gp(ra, l) & w.get_gp(rb, l))
+                w.set_gp(rd, l, w.get_gp(ra, l) & b_of(l))
         elif opcode == Opcode.IOR:
             for l in exec_lanes:
-                w.set_gp(rd, l, w.get_gp(ra, l) | w.get_gp(rb, l))
+                w.set_gp(rd, l, w.get_gp(ra, l) | b_of(l))
         elif opcode == Opcode.IXOR:
             for l in exec_lanes:
-                w.set_gp(rd, l, w.get_gp(ra, l) ^ w.get_gp(rb, l))
+                w.set_gp(rd, l, w.get_gp(ra, l) ^ b_of(l))
         elif opcode == Opcode.SHL:
             for l in exec_lanes:
-                w.set_gp(rd, l, w.get_gp(ra, l) << (w.get_gp(rb, l) & 31))
+                w.set_gp(rd, l, w.get_gp(ra, l) << (b_of(l) & 31))
         elif opcode == Opcode.SHR:
             for l in exec_lanes:
-                w.set_gp(rd, l, w.get_gp(ra, l) >> (w.get_gp(rb, l) & 31))
+                w.set_gp(rd, l, w.get_gp(ra, l) >> (b_of(l) & 31))
         elif opcode == Opcode.FADD:
             for l in exec_lanes:
                 w.set_fp(rd, l, w.get_fp(ra, l) + w.get_fp(rb, l))

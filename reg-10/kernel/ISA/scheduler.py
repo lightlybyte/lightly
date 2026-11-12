@@ -6,9 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import IntEnum
 
-from cpu import SIMTCore
-from ram import MemorySystem
-from dma import DMAEngine, DMAChannel
+from dma import DMAChannel
 
 
 class CmdOp(IntEnum):
@@ -49,12 +47,12 @@ class Scheduler:
         self.cores = cores
         self.memory = memory
         self.dma = dma
-        self.fences: dict[int, bool] = {}
+        self.fences = {}
         self.ring_base = ring_base
         self.ring_head = ring_base
         self.ring_tail = ring_base
-        self.pending_blocks: list[Block] = []
-        self.running_blocks: list[Block] = []
+        self.pending_blocks = []
+        self.running_blocks = []
         self.cycles = 0
         self.halted = False
 
@@ -94,16 +92,15 @@ class Scheduler:
                 self._enqueue_dispatch(
                     grid & 0xFFFF, (grid >> 16) & 0xFFFF,
                     block & 0xFFFF, (block >> 16) & 0xFFFF,
-                    warps, kernel_pc, args_addr, fence_id,
-                )
+                    warps, kernel_pc, args_addr, fence_id)
                 self.ring_head += 28
             elif op == CmdOp.COPY:
                 src = mem.read_u32(self.ring_head + 4)
                 dst = mem.read_u32(self.ring_head + 8)
                 length = mem.read_u32(self.ring_head + 12)
                 ch = mem.read_u32(self.ring_head + 16)
-                fence_id = mem.read_u32(self.ring_head + 20)
-                self.dma.submit_copy(DMAChannel(ch), src, dst, length, fence_id)
+                fid = mem.read_u32(self.ring_head + 20)
+                self.dma.submit_copy(DMAChannel(ch), src, dst, length, fid)
                 self.ring_head += 24
             elif op == CmdOp.FENCE:
                 self.signal_fence(mem.read_u32(self.ring_head + 4))
@@ -134,7 +131,7 @@ class Scheduler:
                         ))
                         bid += 1
 
-    def _free_warps_on(self, core_id: int, count: int) -> list[int] | None:
+    def _free_warps_on(self, core_id, count):
         core = self.cores[core_id]
         active = set(core.active_warps)
         free = [i for i in range(len(core.warps)) if i not in active]
@@ -181,7 +178,7 @@ class Scheduler:
                 still_running.append(block)
         self.running_blocks = still_running
 
-    def run(self, max_cycles: int = 10_000_000) -> int:
+    def run(self, max_cycles=10_000_000):
         while (self.pending_blocks or self.running_blocks
                or self.ring_head < self.ring_tail):
             if self.cycles >= max_cycles:
