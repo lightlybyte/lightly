@@ -1,36 +1,22 @@
 """
 assembler.py - Two-pass assembler for the Re:G SIMT ISA.
 
-Syntax:
-  [@P[!]N]  MNEMONIC  operands...  [; comment]
-
-Operands:
-  rN     general-purpose register (0..31)
-  fN     floating-point register (0..31)
-  pN     predicate register (0..7)
-  imm    integer literal (decimal, 0x hex)
-  label  target for branch instructions
-
-Predication:
-  @P0    execute if predicate 0 is true
-  @!P0   execute if predicate 0 is false
-
-Directives:
-  .org ADDR       set assembly origin
-  .label NAME     define a label at the current PC
-  .word VALUE     emit a raw 64-bit word
-  .string "..."   emit a length-prefixed UTF-8 string
-  .fill N         emit N zero words
+CLI:
+  python assembler.py <input.s>              # assemble to <input>.bin
+  python assembler.py <input.s> -o out.bin   # explicit output
+  python assembler.py <input.s> --run        # assemble then execute
+  python assembler.py <input.s> --run --fb 1920x1080
 """
 
 from __future__ import annotations
-import re
+import argparse
+import sys
 from dataclasses import dataclass
 from cpu import Opcode, encode
 
 
 # ============================================================
-# TOKENIZER / PARSER
+# PARSING (unchanged from previous version)
 # ============================================================
 
 @dataclass(slots=True)
@@ -41,30 +27,6 @@ class ParsedLine:
     operands: list[str]
     pred: int = 0xFF
     pred_neg: bool = False
-
-
-TOKEN_RE = re.compile(
-    r"""
-    (?P<label>^\w+:)
-    |
-    (?P<pred>@!?P\d+)
-    |
-    (?P<directive>\.\w+)
-    |
-    (?P<mnemonic>[A-Za-z_]\w*)
-    |
-    (?P<reg>[rfp]\d+)
-    |
-    (?P<imm>-?(?:0x[0-9A-Fa-f]+|\d+))
-    |
-    (?P<string>"[^"]*")
-    |
-    (?P<comma>,)
-    |
-    (?P<semicolon>;)
-    """,
-    re.VERBOSE,
-)
 
 
 def strip_comment(line: str) -> str:
@@ -81,34 +43,25 @@ def parse_line(line: str, line_no: int) -> ParsedLine | None:
     line = strip_comment(line).strip()
     if not line:
         return None
-
-    label = None
     if line.endswith(':') and ' ' not in line and ',' not in line:
-        label = line[:-1]
-        return ParsedLine(line_no, label, None, [])
-
+        return ParsedLine(line_no, line[:-1], None, [])
     pred = 0xFF
     pred_neg = False
     if line.startswith('@'):
+        import re
         m = re.match(r'@(!?)P(\d+)\s+(.*)', line)
         if not m:
             raise SyntaxError(f"line {line_no}: bad predicate: {line}")
         pred_neg = m.group(1) == '!'
         pred = int(m.group(2))
         line = m.group(3)
-
     parts = line.split(None, 1)
     mnemonic = parts[0]
     rest = parts[1] if len(parts) > 1 else ""
-
     operands = [op.strip() for op in rest.split(',')] if rest else []
-    return ParsedLine(line_no, label, mnemonic, operands,
+    return ParsedLine(line_no, None, mnemonic, operands,
                       pred=pred, pred_neg=pred_neg)
 
-
-# ============================================================
-# OPERAND ENCODING
-# ============================================================
 
 def reg_index(tok: str, prefix: str) -> int:
     if not tok or tok[0] != prefix:
@@ -123,11 +76,6 @@ def imm_value(tok: str) -> int:
     return int(tok, 0)
 
 
-# ============================================================
-# MNEMONIC -> ENCODING
-# ============================================================
-
-# operand layouts: R=reg, I=imm, L=label
 INSTR_FORMATS = {
     "NOP":    (Opcode.NOP,    ""),
     "HALT":   (Opcode.HALT,   ""),
@@ -165,10 +113,6 @@ INSTR_FORMATS = {
 }
 
 
-# ============================================================
-# ASSEMBLER
-# ============================================================
-
 class Assembler:
     def __init__(self):
         self.labels: dict[str, int] = {}
@@ -176,14 +120,10 @@ class Assembler:
         self.org = 0
 
     def assemble(self, source: str) -> bytes:
-        lines = source.splitlines()
-        parsed = []
-        for i, raw in enumerate(lines, 1):
-            p = parse_line(raw, i)
-            if p:
-                parsed.append(p)
+        parsed = [parse_line(raw, i) for i, raw in enumerate(source.splitlines(), 1)]
+        parsed = [p for p in parsed if p]
 
-        # Pass 1: labels
+        # Pass 1
         self.pc = 0
         for p in parsed:
             if p.label:
@@ -202,7 +142,7 @@ class Assembler:
             elif p.mnemonic and not p.mnemonic.startswith('.'):
                 self.pc += 8
 
-        # Pass 2: emit
+        # Pass 2
         out = bytearray()
         self.pc = 0
         for p in parsed:
@@ -224,8 +164,7 @@ class Assembler:
                 out += b"\x00" * (8 * n)
                 self.pc += 8 * n
             elif p.mnemonic and not p.mnemonic.startswith('.'):
-                word = self._encode_instruction(p)
-                out += word.to_bytes(8, "little")
+                out += self._encode_instruction(p).to_bytes(8, "little")
                 self.pc += 8
         return bytes(out)
 
@@ -235,13 +174,9 @@ class Assembler:
         op, fmt = INSTR_FORMATS[p.mnemonic]
         if len(p.operands) != len(fmt):
             raise SyntaxError(
-                f"line {p.line_no}: {p.mnemonic} expects {len(fmt)} operands, "
-                f"got {len(p.operands)}")
-
+                f"line {p.line_no}: {p.mnemonic} expects {len(fmt)} operands")
         rd = ra = rb = rc = pd = 0
         imm = 0
-        imm2 = 0
-
         for i, (kind, tok) in enumerate(zip(fmt, p.operands)):
             if kind == 'R':
                 reg = reg_index(tok, 'r')
@@ -257,52 +192,96 @@ class Assembler:
                 if tok not in self.labels:
                     raise SyntaxError(f"line {p.line_no}: undefined label {tok}")
                 target = self.labels[tok]
-                # PC-relative offset in instruction words
                 word_pc = (self.pc - self.org) // 8
                 target_words = (target - self.org) // 8
-                offset = target_words - word_pc
-                imm = offset & 0xFFFF
-
+                imm = (target_words - word_pc) & 0xFFFF
         return encode(op, rd, ra, rb, rc, pd,
-                      pred=(p.pred != 0xFF), imm=imm, imm2=imm2)
+                      pred=(p.pred != 0xFF), imm=imm)
 
-
-# ============================================================
-# CONVENIENCE
-# ============================================================
 
 def assemble(source: str) -> bytes:
     return Assembler().assemble(source)
 
 
 # ============================================================
-# SMOKE TEST
+# RUNNER
 # ============================================================
 
-if __name__ == "__main__":
-    src = """
-        .org 0x1000
-    start:
-        MOVI  r1, 10
-        MOVI  r2, 20
-        IADD  r3, r1, r2
-        @P0 IADD r4, r3, r1
-        BRA   done
-        MOVI  r5, 99       ; skipped
-    done:
-        HALT
-    """
-    code = assemble(src)
-    print(f"assembled {len(code)} bytes")
-    print(code.hex())
+def run_program(code: bytes, fb_w: int, fb_h: int,
+                origin: int = 0x1000,
+                max_cycles: int = 10_000_000) -> None:
+    from ram import MemorySystem
+    from cpu import SIMTCore
+    from dma import DMAEngine
+    from scheduler import Scheduler
 
-    # Verify with disassembler if you have it
-    from cpu import Opcode
-    for off in range(0, len(code), 8):
-        w = int.from_bytes(code[off:off + 8], "little")
-        op = (w >> 58) & 0x3F
+    mem = MemorySystem(num_cores=1, fb_width=fb_w, fb_height=fb_h)
+    cores = [SIMTCore(core_id=0, num_warps=32, memory=mem.global_ram)] # type: ignore
+    dma = DMAEngine(mem.global_ram, mem.scratchpads, mem.framebuffer)
+    sched = Scheduler(cores, mem, dma, ring_base=0x100)
+
+    # Load program at origin
+    mem.global_ram.load(code, origin)
+
+    # Launch one block with one warp
+    fence = sched.new_fence()
+    sched.submit_command([
+        1,              # DISPATCH
+        1,              # grid = 1x1
+        1,              # block = 1x1
+        1,              # warps per block
+        origin,         # kernel PC
+        0,              # args addr
+        fence,          # fence
+    ])
+
+    cycles = sched.run(max_cycles=max_cycles)
+    print(f"executed {cycles} cycles")
+    print(f"fence {fence} signalled: {sched.is_fence_signalled(fence)}")
+    print(f"framebuffer checksum: {sum(mem.framebuffer.buffer) & 0xFFFFFFFF}")
+
+
+# ============================================================
+# CLI
+# ============================================================
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="Re:G assembler")
+    ap.add_argument("input", help="assembly source file")
+    ap.add_argument("-o", "--output", help="output binary (default: <input>.bin)")
+    ap.add_argument("--run", action="store_true", help="assemble then run on the CPU")
+    ap.add_argument("--fb", default="320x240",
+                    help="framebuffer size WxH (default 320x240)")
+    ap.add_argument("--cycles", type=int, default=10_000_000,
+                    help="max cycles for --run")
+    ap.add_argument("--origin", type=lambda s: int(s, 0), default=0x1000,
+                    help="load address (default 0x1000)")
+    args = ap.parse_args(argv)
+
+    src = open(args.input, "r", encoding="utf-8").read()
+    try:
+        code = assemble(src)
+    except SyntaxError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+    out_path = args.output or (args.input.rsplit('.', 1)[0] + ".bin")
+    with open(out_path, "wb") as f:
+        f.write(code)
+    print(f"assembled {len(code)} bytes -> {out_path}")
+
+    if args.run:
         try:
-            name = Opcode(op).name
+            w, h = args.fb.lower().split('x')
+            fb_w, fb_h = int(w), int(h)
         except ValueError:
-            name = f"<{op:#x}>"
-        print(f"  {off:#06x}: {name}  {w:016x}")
+            print(f"error: bad --fb value {args.fb!r} (expected WxH)",
+                  file=sys.stderr)
+            return 1
+        run_program(code, fb_w, fb_h, origin=args.origin,
+                    max_cycles=args.cycles)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
