@@ -1,8 +1,14 @@
 """
 assembler.py - Two-pass assembler for the Re:G SIMT ISA, with optimizer.
 
-Adds immediate forms: ADDI, SUBI, MULI, ANDI, ORI, XORI, SHLI, SHRI.
-SETP's 4th operand (compare mode) is optional and defaults to 0 (<).
+Features:
+  - Immediate ALU forms: ADDI, SUBI, MULI, ANDI, ORI, XORI, SHLI, SHRI
+  - SETP's compare-mode operand is optional (defaults to 0 = '<')
+  - Optimizer passes:
+      1. unreachable-code elimination (only HALT/RET terminate fallthrough)
+      2. MOV rN, rN elimination
+      3. NOP elimination (unlabeled only)
+  - Runner with optional non-blocking tkinter screen
 """
 
 from __future__ import annotations
@@ -147,9 +153,9 @@ INSTR_FORMATS = {
 BRANCHES = {"BRA", "BRA_DIV"}
 TERMINATORS = {"HALT", "RET"}
 
-# Trailing operands that may be omitted; the default is appended if absent.
+# Trailing operands that may be omitted, with their default literal.
 OPTIONAL_TAIL = {
-    "SETP": (1, "0"),   # compare mode defaults to 0 (<)
+    "SETP": (1, "0"),
 }
 
 
@@ -234,9 +240,8 @@ class Assembler:
                 f"line {ins.line_no}: unknown mnemonic {ins.mnemonic!r}")
         op, fmt = INSTR_FORMATS[ins.mnemonic]
 
-        # Optional trailing operands
-        tail = OPTIONAL_TAIL.get(ins.mnemonic)
         n_got = len(ins.operands)
+        tail = OPTIONAL_TAIL.get(ins.mnemonic)
         if tail:
             tail_count, tail_default = tail
             n_min = len(fmt) - tail_count
@@ -315,14 +320,23 @@ class Assembler:
 
 
 # ============================================================
-# OPTIMIZER
+# OPTIMIZER PASSES
 # ============================================================
 
 def _eliminate_unreachable(instrs: list[Instr]) -> list[Instr]:
+    """
+    Remove instructions unreachable by fallthrough from entry or by a
+    branch-target label.
+
+    Only HALT and RET terminate fallthrough. BRA / BRA_DIV do not:
+    they redirect control to a label, which the scan already treats as
+    a point where reachability resumes.
+    """
     targets = set()
     for ins in instrs:
         if ins.mnemonic in BRANCHES and ins.operands:
             targets.add(ins.operands[0])
+
     out = []
     reachable = True
     for ins in instrs:
@@ -336,7 +350,7 @@ def _eliminate_unreachable(instrs: list[Instr]) -> list[Instr]:
         if not reachable:
             continue
         out.append(ins)
-        if ins.mnemonic in TERMINATORS or ins.mnemonic in BRANCHES:
+        if ins.mnemonic in TERMINATORS:
             reachable = False
     return out
 
