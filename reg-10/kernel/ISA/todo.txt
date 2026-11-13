@@ -54,10 +54,8 @@ Legend:
   [x] Lane masking by active_mask
   [x] Call stack (CALL / RET)
   [x] Tensor units with busy/ready state
+  [x] TENSOR result written to all lanes (per-lane FMA, was lane-0 only)
   [x] PC bounds check (fixed: uses .size, not .SIZE)
-
-  [!] TENSOR result is only written to lane 0 of the warp
-      (should be per-lane or explicitly broadcast)
   [ ] Tensor unit result should be a real matrix op, not scalar mul
   [ ] Warp scheduler should prefer warps not waiting on tensor
   [ ] Add cycle counters per instruction class (for profiling)

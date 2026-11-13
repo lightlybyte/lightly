@@ -2,12 +2,12 @@
 cpu.py - SIMT processor core for the Re:G ISA v2.
 
 Encoding (64-bit):
-  [63:58] opcode    (6)
-  [57:53] rd        (5)  destination (GP or FP depending on opcode)
-  [52:48] ra        (5)  source A
-  [47:43] rb        (5)  source B
-  [42:38] pred_reg  (5)  0-7 = P0-P7, 8-15 = !P0-!P7, 31 = none
-  [37:33] pd        (5)  predicate destination (SETP/NOTP)
+  [63:57] opcode    (7)  0-127 (was 6 bits in v1; opcodes >= 64 now fit)
+  [56:52] rd        (5)  destination (GP or FP depending on opcode)
+  [51:47] ra        (5)  source A
+  [46:42] rb        (5)  source B
+  [41:37] pred_reg  (5)  0-7 = P0-P7, 8-15 = !P0-!P7, 31 = none
+  [36:33] pd        (4)  predicate destination (SETP/NOTP), P0-P15
   [32]    use_imm   (1)  1 = operand B is imm32
   [31:0]  imm32     (32) signed 32-bit immediate
 """
@@ -78,12 +78,12 @@ class Opcode(IntEnum):
 
 def encode(op, rd=0, ra=0, rb=0, pred_reg=31, pd=0, use_imm=False, imm=0):
     return (
-        ((op & 0x3F) << 58)
-        | ((rd & 0x1F) << 53)
-        | ((ra & 0x1F) << 48)
-        | ((rb & 0x1F) << 43)
-        | ((pred_reg & 0x1F) << 38)
-        | ((pd & 0x1F) << 33)
+        ((op & 0x7F) << 57)
+        | ((rd & 0x1F) << 52)
+        | ((ra & 0x1F) << 47)
+        | ((rb & 0x1F) << 42)
+        | ((pred_reg & 0x1F) << 37)
+        | ((pd & 0x0F) << 33)
         | ((1 if use_imm else 0) << 32)
         | (imm & 0xFFFFFFFF)
     )
@@ -135,7 +135,7 @@ class Warp:
 @dataclass
 class TensorUnit:
     busy_cycles: int = 0
-    result: float = 0.0
+    results: list = field(default_factory=lambda: [0.0] * LANES)
     dest_fp: int = 0
     dest_warp: int = -1
 
@@ -209,7 +209,7 @@ class SIMTCore:
                 if tu.dest_warp >= 0:
                     dw = self.warps[tu.dest_warp]
                     for lane in dw.active_lanes():
-                        dw.set_fp(tu.dest_fp, lane, tu.result)
+                        dw.set_fp(tu.dest_fp, lane, tu.results[lane])
                     if dw.state == "WAITING" and dw.wait_reason == f"tensor{i}":
                         dw.state = "READY"
                         dw.wait_reason = ""
@@ -225,12 +225,12 @@ class SIMTCore:
         word = self.memory.read_u64(w.pc)
         w.pc += 8
 
-        op       = (word >> 58) & 0x3F
-        rd       = (word >> 53) & 0x1F
-        ra       = (word >> 48) & 0x1F
-        rb       = (word >> 43) & 0x1F
-        pred_reg = (word >> 38) & 0x1F
-        pd       = (word >> 33) & 0x1F
+        op       = (word >> 57) & 0x7F
+        rd       = (word >> 52) & 0x1F
+        ra       = (word >> 47) & 0x1F
+        rb       = (word >> 42) & 0x1F
+        pred_reg = (word >> 37) & 0x1F
+        pd       = (word >> 33) & 0x0F
         use_imm  = (word >> 32) & 1
         imm      = sext32(word & 0xFFFFFFFF)
 
@@ -445,7 +445,10 @@ class SIMTCore:
             tu.busy_cycles = 4
             tu.dest_fp = rd
             tu.dest_warp = w.warp_id
-            tu.result = w.get_fp(ra, exec_lanes[0]) * w.get_fp(rb, exec_lanes[0])
+            for l in exec_lanes:
+                tu.results[l] = (
+                    w.get_fp(ra, l) * w.get_fp(rb, l) + w.get_fp(rd, l)
+                )
 
         elif opcode == Opcode.BAR:
             pass

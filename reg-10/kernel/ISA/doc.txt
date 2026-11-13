@@ -36,12 +36,14 @@ Memory spaces
 2. INSTRUCTION ENCODING (64 bits)
 ================================================================================
 
-  [63:58]  opcode     6 bits
-  [57:53]  rd         5 bits   destination register
-  [52:48]  ra         5 bits   source A
-  [47:43]  rb         5 bits   source B
-  [42:38]  pred_reg   5 bits   predicate guard (see below)
-  [37:33]  pd         5 bits   predicate destination (SETP / NOTP)
+  [63:57]  opcode     7 bits   0-127 (v2 uses the full 7-bit field; opcodes
+                                >= 64 such as SETP, BRA, TENSOR, etc. now
+                                encode correctly instead of wrapping)
+  [56:52]  rd         5 bits   destination register
+  [51:47]  ra         5 bits   source A
+  [46:42]  rb         5 bits   source B
+  [41:37]  pred_reg   5 bits   predicate guard (see below)
+  [36:33]  pd         4 bits   predicate destination P0-P15 (SETP / NOTP)
   [32]     use_imm    1 bit    1 = operand B is the 32-bit immediate
   [31:0]   imm32      32 bits  signed or unsigned depending on use
 
@@ -122,9 +124,10 @@ Warp intrinsics
 
 Tensor
 ------
-  0x70  TENSOR fd, fa, fb, imm    Async tensor op. imm & 3 = unit index.
-                                   Result is written to fd when the unit
-                                   finishes. The warp stalls until then.
+  0x70  TENSOR fd, fa, fb, imm    Async tensor FMA. imm & 3 = unit index.
+                                   fd[l] = fa[l] * fb[l] + fd[l] for every
+                                   active lane l. The warp stalls until the
+                                   unit finishes (4-cycle latency).
 
 Misc
 ----
