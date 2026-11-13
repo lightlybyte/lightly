@@ -1,5 +1,12 @@
 """
-assembler.py - Two-pass assembler for the Re:G SIMT ISA. No optimizer.
+assembler.py - Two-pass assembler for the Re:G ISA v2.
+
+Fixes in this version:
+  - SETP operands are now PABI (predicate dest, src A, src B, imm mode).
+    The old PRRI format wrote ra/rb in the wrong order, so
+    `SETP p0, r1, r13, 0` became `p0 = (r13 < r0)` instead of
+    `p0 = (r1 < r13)`. That made every loop terminate immediately.
+  - All other operand layouts unchanged.
 """
 
 from __future__ import annotations
@@ -10,14 +17,17 @@ from dataclasses import dataclass
 from cpu import Opcode, encode
 
 
+# ============================================================
+# PARSED REPRESENTATION
+# ============================================================
+
 @dataclass(slots=True)
 class ParsedLine:
     line_no: int
     label: str | None
     mnemonic: str | None
     operands: list[str]
-    pred: int = 0xFF
-    pred_neg: bool = False
+    pred_reg: int = 31
 
 
 @dataclass(slots=True)
@@ -25,18 +35,21 @@ class Instr:
     mnemonic: str
     operands: list[str]
     line_no: int
-    pred: int = 0xFF
-    pred_neg: bool = False
+    pred_reg: int = 31
     label: str | None = None
+    op: Opcode | None = None
     rd: int = 0
     ra: int = 0
     rb: int = 0
-    rc: int = 0
     pd: int = 0
+    use_imm: bool = False
     imm: int = 0
-    op: Opcode | None = None
     is_label_only: bool = False
 
+
+# ============================================================
+# PARSING
+# ============================================================
 
 def strip_comment(line: str) -> str:
     in_str = False
@@ -54,22 +67,21 @@ def parse_line(line: str, line_no: int) -> ParsedLine | None:
         return None
     if line.endswith(':') and ' ' not in line and ',' not in line:
         return ParsedLine(line_no, line[:-1], None, [])
-    pred = 0xFF
-    pred_neg = False
+    pred_reg = 31
     if line.startswith('@'):
         import re
         m = re.match(r'@(!?)P(\d+)\s+(.*)', line)
         if not m:
             raise SyntaxError(f"line {line_no}: bad predicate: {line}")
-        pred_neg = m.group(1) == '!'
-        pred = int(m.group(2))
+        neg = m.group(1) == '!'
+        pidx = int(m.group(2))
+        pred_reg = (pidx + 8) if neg else pidx
         line = m.group(3)
     parts = line.split(None, 1)
     mnemonic = parts[0]
     rest = parts[1] if len(parts) > 1 else ""
     operands = [op.strip() for op in rest.split(',')] if rest else []
-    return ParsedLine(line_no, None, mnemonic, operands,
-                      pred=pred, pred_neg=pred_neg)
+    return ParsedLine(line_no, None, mnemonic, operands, pred_reg=pred_reg)
 
 
 def reg_index(tok: str, prefix: str) -> int:
@@ -85,52 +97,86 @@ def imm_value(tok: str) -> int:
     return int(tok, 0)
 
 
+# ============================================================
+# INSTRUCTION FORMATS
+# ============================================================
+#
+# Symbols:
+#   R = GP register, filled in order rd -> ra -> rb
+#   F = FP register, filled in order rd -> ra -> rb
+#   A = explicitly ra (reg_index)
+#   B = explicitly rb (reg_index)
+#   P = predicate register; first P -> pd, second P -> ra
+#   I = immediate 32 (sets use_imm)
+#   O = register or immediate (rb or imm32)
+#   L = label (PC-relative byte offset in imm32)
+#
 INSTR_FORMATS = {
-    "NOP":    (Opcode.NOP,    ""),
-    "HALT":   (Opcode.HALT,   ""),
-    "LDG":    (Opcode.LDG,    "RRI"),
-    "STG":    (Opcode.STG,    "RRI"),
-    "LDS":    (Opcode.LDS,    "RRI"),
-    "STS":    (Opcode.STS,    "RRI"),
-    "MOV":    (Opcode.MOV,    "RR"),
-    "MOVI":   (Opcode.MOVI,   "RI"),
-    "IADD":   (Opcode.IADD,   "RRR"),
-    "ISUB":   (Opcode.ISUB,   "RRR"),
-    "IMUL":   (Opcode.IMUL,   "RRR"),
-    "IAND":   (Opcode.IAND,   "RRR"),
-    "IOR":    (Opcode.IOR,    "RRR"),
-    "IXOR":   (Opcode.IXOR,   "RRR"),
-    "SHL":    (Opcode.SHL,    "RRR"),
-    "SHR":    (Opcode.SHR,    "RRR"),
-    "ADDI":   (Opcode.IADD,   "RRI"),
-    "SUBI":   (Opcode.ISUB,   "RRI"),
-    "MULI":   (Opcode.IMUL,   "RRI"),
-    "ANDI":   (Opcode.IAND,   "RRI"),
-    "ORI":    (Opcode.IOR,    "RRI"),
-    "XORI":   (Opcode.IXOR,   "RRI"),
-    "SHLI":   (Opcode.SHL,    "RRI"),
-    "SHRI":   (Opcode.SHR,    "RRI"),
-    "FADD":   (Opcode.FADD,   "RRR"),
-    "FSUB":   (Opcode.FSUB,   "RRR"),
-    "FMUL":   (Opcode.FMUL,   "RRR"),
-    "FFMA":   (Opcode.FFMA,   "RRR"),
-    "FMIN":   (Opcode.FMIN,   "RRR"),
-    "FMAX":   (Opcode.FMAX,   "RRR"),
-    "I2F":    (Opcode.I2F,    "RR"),
-    "F2I":    (Opcode.F2I,    "RR"),
-    "SETP":   (Opcode.SETP,   "PRRI"),
-    "BRA":    (Opcode.BRA,    "L"),
-    "BRA_DIV":(Opcode.BRA_DIV,"L"),
-    "RET":    (Opcode.RET,    ""),
-    "VOTE":   (Opcode.VOTE,   "RI"),
-    "SHFL":   (Opcode.SHFL,   "RRI"),
-    "TENSOR": (Opcode.TENSOR, "RRRI"),
-    "BAR":    (Opcode.BAR,    ""),
-    "SYSCALL":(Opcode.SYSCALL,"RI"),
+    "NOP":    ("",     Opcode.NOP),
+    "HALT":   ("",     Opcode.HALT),
+    "RET":    ("",     Opcode.RET),
+
+    "LDG":    ("RRI",  Opcode.LDG),
+    "STG":    ("RRI",  Opcode.STG),
+    "LDGB":   ("RRI",  Opcode.LDGB),
+    "LDGH":   ("RRI",  Opcode.LDGH),
+    "LDS":    ("RRI",  Opcode.LDS),
+    "STS":    ("RRI",  Opcode.STS),
+
+    "MOV":    ("RR",   Opcode.MOV),
+    "MOVI":   ("RI",   Opcode.MOVI),
+    "IADD":   ("RRO",  Opcode.IADD),
+    "ISUB":   ("RRO",  Opcode.ISUB),
+    "IMUL":   ("RRO",  Opcode.IMUL),
+    "IAND":   ("RRO",  Opcode.IAND),
+    "IOR":    ("RRO",  Opcode.IOR),
+    "IXOR":   ("RRO",  Opcode.IXOR),
+    "SHL":    ("RRO",  Opcode.SHL),
+    "SHR":    ("RRO",  Opcode.SHR),
+    "ISGT":   ("RRO",  Opcode.ISGT),
+    "ISLT":   ("RRO",  Opcode.ISLT),
+    "ISEQ":   ("RRO",  Opcode.ISEQ),
+
+    "ADDI":   ("RRI",  Opcode.IADD),
+    "SUBI":   ("RRI",  Opcode.ISUB),
+    "MULI":   ("RRI",  Opcode.IMUL),
+    "ANDI":   ("RRI",  Opcode.IAND),
+    "ORI":    ("RRI",  Opcode.IOR),
+    "XORI":   ("RRI",  Opcode.IXOR),
+    "SHLI":   ("RRI",  Opcode.SHL),
+    "SHRI":   ("RRI",  Opcode.SHR),
+
+    "FADD":   ("FFF",  Opcode.FADD),
+    "FSUB":   ("FFF",  Opcode.FSUB),
+    "FMUL":   ("FFF",  Opcode.FMUL),
+    "FFMA":   ("FFF",  Opcode.FFMA),
+    "FMIN":   ("FFF",  Opcode.FMIN),
+    "FMAX":   ("FFF",  Opcode.FMAX),
+    "I2F":    ("FR",   Opcode.I2F),
+    "F2I":    ("RF",   Opcode.F2I),
+
+    # FIX: PABI so the two source regs land in ra and rb, not rd and ra
+    "SETP":   ("PABI", Opcode.SETP),
+    "NOTP":   ("PP",   Opcode.NOTP),
+
+    "BRA":    ("L",    Opcode.BRA),
+    "BRA_DIV":("L",    Opcode.BRA_DIV),
+    "CALL":   ("L",    Opcode.CALL),
+    "JR":     ("R",    Opcode.JR),
+
+    "VOTE":   ("RI",   Opcode.VOTE),
+    "SHFL":   ("RRI",  Opcode.SHFL),
+    "LANEID": ("R",    Opcode.LANEID),
+
+    "TENSOR": ("RRRI", Opcode.TENSOR),
+    "SYSCALL":("I",    Opcode.SYSCALL),
+    "BAR":    ("",     Opcode.BAR),
 }
 
-OPTIONAL_TAIL = {"SETP": (1, "0")}
 
+# ============================================================
+# ASSEMBLER
+# ============================================================
 
 class Assembler:
     def __init__(self):
@@ -153,8 +199,8 @@ class Assembler:
                                     label=p.label, is_label_only=True))
             else:
                 instrs.append(Instr(mnemonic=p.mnemonic, operands=p.operands,
-                                    line_no=p.line_no, pred=p.pred,
-                                    pred_neg=p.pred_neg, label=p.label))
+                                    line_no=p.line_no, pred_reg=p.pred_reg,
+                                    label=p.label))
         return instrs
 
     def _assign_labels(self, instrs):
@@ -201,54 +247,70 @@ class Assembler:
         if ins.mnemonic not in INSTR_FORMATS:
             raise SyntaxError(
                 f"line {ins.line_no}: unknown mnemonic {ins.mnemonic!r}")
-        op, fmt = INSTR_FORMATS[ins.mnemonic]
+        fmt, op = INSTR_FORMATS[ins.mnemonic]
 
-        n_got = len(ins.operands)
-        tail = OPTIONAL_TAIL.get(ins.mnemonic)
-        if tail:
-            tail_count, tail_default = tail
-            n_min = len(fmt) - tail_count
-            if not (n_min <= n_got <= len(fmt)):
-                raise SyntaxError(
-                    f"line {ins.line_no}: {ins.mnemonic} expects "
-                    f"{n_min}..{len(fmt)} operands, got {n_got}")
-            operands = list(ins.operands)
-            while len(operands) < len(fmt):
-                operands.append(tail_default)
-        else:
-            if n_got != len(fmt):
-                raise SyntaxError(
-                    f"line {ins.line_no}: {ins.mnemonic} expects {len(fmt)} "
-                    f"operands, got {n_got}")
-            operands = ins.operands
+        if len(ins.operands) != len(fmt):
+            raise SyntaxError(
+                f"line {ins.line_no}: {ins.mnemonic} expects {len(fmt)} "
+                f"operands, got {len(ins.operands)}")
 
         ins.op = op
-        rd = ra = rb = rc = pd = 0
+        rd = ra = rb = pd = 0
+        use_imm = False
         imm = 0
-        for i, (kind, tok) in enumerate(zip(fmt, operands)):
+        rd_seen = ra_seen = rb_seen = pd_seen = False
+
+        for i, (kind, tok) in enumerate(zip(fmt, ins.operands)):
             try:
                 if kind == 'R':
-                    reg = reg_index(tok, 'r')
-                    if i == 0: rd = reg
-                    elif i == 1: ra = reg
-                    elif i == 2: rb = reg
-                    elif i == 3: rc = reg
+                    r = reg_index(tok, 'r')
+                    if not rd_seen:
+                        rd = r; rd_seen = True
+                    elif not ra_seen:
+                        ra = r; ra_seen = True
+                    elif not rb_seen:
+                        rb = r; rb_seen = True
+                elif kind == 'F':
+                    r = reg_index(tok, 'f')
+                    if not rd_seen:
+                        rd = r; rd_seen = True
+                    elif not ra_seen:
+                        ra = r; ra_seen = True
+                    elif not rb_seen:
+                        rb = r; rb_seen = True
+                elif kind == 'A':
+                    ra = reg_index(tok, 'r'); ra_seen = True
+                elif kind == 'B':
+                    rb = reg_index(tok, 'r'); rb_seen = True
                 elif kind == 'P':
-                    pd = reg_index(tok, 'p') if tok.startswith('p') else int(tok)
+                    p = reg_index(tok, 'p') if tok.startswith('p') else int(tok)
+                    if not pd_seen:
+                        pd = p; pd_seen = True
+                    else:
+                        ra = p
                 elif kind == 'I':
-                    imm = imm_value(tok) & 0x7FFF
+                    imm = imm_value(tok) & 0xFFFFFFFF
+                    use_imm = True
+                elif kind == 'O':
+                    if tok.startswith('r'):
+                        rb = reg_index(tok, 'r'); rb_seen = True
+                    else:
+                        imm = imm_value(tok) & 0xFFFFFFFF
+                        use_imm = True
                 elif kind == 'L':
                     if tok not in self.labels:
                         raise SyntaxError(f"undefined label {tok!r}")
                     target = self.labels[tok]
-                    word_pc = (pc - self.org) // 8
-                    target_words = (target - self.org) // 8
-                    imm = (target_words - word_pc) & 0x7FFF
+                    offset = target - (pc + 8)
+                    imm = offset & 0xFFFFFFFF
+                    use_imm = True
             except (ValueError, SyntaxError) as e:
                 raise SyntaxError(
                     f"line {ins.line_no}: {ins.mnemonic} operand {i+1} "
                     f"({tok!r}) invalid: {e}") from e
-        ins.rd, ins.ra, ins.rb, ins.rc, ins.pd = rd, ra, rb, rc, pd
+
+        ins.rd, ins.ra, ins.rb, ins.pd = rd, ra, rb, pd
+        ins.use_imm = use_imm
         ins.imm = imm
 
     def _emit(self, instrs):
@@ -269,9 +331,11 @@ class Assembler:
             elif ins.mnemonic == ".fill":
                 out += b"\x00" * (8 * ins.imm)
             elif ins.mnemonic and not ins.mnemonic.startswith('.'):
-                word = encode(ins.op, ins.rd, ins.ra, ins.rb, ins.rc, ins.pd,
-                              pred=(ins.pred != 0xFF), pred_neg=ins.pred_neg,
-                              imm=ins.imm)
+                word = encode(
+                    op=ins.op, rd=ins.rd, ra=ins.ra, rb=ins.rb,
+                    pred_reg=ins.pred_reg, pd=ins.pd,
+                    use_imm=ins.use_imm, imm=ins.imm,
+                )
                 out += word.to_bytes(8, "little")
         return bytes(out)
 
@@ -279,6 +343,10 @@ class Assembler:
 def assemble(source: str) -> bytes:
     return Assembler().assemble(source)
 
+
+# ============================================================
+# RUNNER
+# ============================================================
 
 def run_program(code, fb_w, fb_h, origin=0x1000, max_cycles=10_000_000):
     from ram import MemorySystem
@@ -290,29 +358,37 @@ def run_program(code, fb_w, fb_h, origin=0x1000, max_cycles=10_000_000):
     cores = [SIMTCore(core_id=0, num_warps=32, memory=mem.global_ram)]
     dma = DMAEngine(mem.global_ram, mem.scratchpads, mem.framebuffer)
     sched = Scheduler(cores, mem, dma, ring_base=0x100)
-    mem.global_ram.load(code, 0)
+
+    mem.global_ram.load(code, origin)
+
+    print(f"code size: {len(code)} bytes")
+    print(f"origin: {hex(origin)}")
+    print(f"first word loaded at origin: {hex(mem.global_ram.read_u64(origin))}")
 
     fence = sched.new_fence()
-    sched.submit_command([1, 1, 1, 1, origin, 0, fence])
+    sched.submit_command([1, (1 << 16) | 1, (1 << 16) | 1, 1, origin, 0, fence])
     cycles = sched.run(max_cycles=max_cycles)
 
     print(f"executed {cycles} cycles")
     print(f"fence {fence} signalled: {sched.is_fence_signalled(fence)}")
-    print(f"code size: {len(code)} bytes")
-    print(f"fb.base: {hex(mem.framebuffer.base)}")
+    print(f"warp 0 state: {cores[0].warps[0].state}")
+    print(f"warp 0 pc:    {hex(cores[0].warps[0].pc)}")
 
     fb = mem.framebuffer
+    print(f"fb.base: {hex(fb.base)}")
     print(f"pixel(0,0)       = {hex(fb.read_pixel(0, 0))}")
     print(f"pixel(160,120)   = {hex(fb.read_pixel(160, 120))}")
     print(f"pixel(319,239)   = {hex(fb.read_pixel(319, 239))}")
-    print(f"ram@fb.base      = {hex(mem.global_ram.read_u32(fb.base))}")
-    print(f"ram@fb.base+4    = {hex(mem.global_ram.read_u32(fb.base + 4))}")
 
     return mem
 
 
+# ============================================================
+# CLI
+# ============================================================
+
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Re:G assembler (no opt)")
+    ap = argparse.ArgumentParser(description="Re:G assembler v2")
     ap.add_argument("input")
     ap.add_argument("-o", "--output")
     ap.add_argument("--run", action="store_true")
@@ -320,7 +396,7 @@ def main(argv=None):
     ap.add_argument("--cycles", type=int, default=10_000_000)
     ap.add_argument("--origin", type=lambda s: int(s, 0), default=0x1000)
     ap.add_argument("--screen", action="store_true")
-    ap.add_argument("--seconds", type=float, default=3.0)
+    ap.add_argument("--seconds", type=float, default=5.0)
     args = ap.parse_args(argv)
 
     try:

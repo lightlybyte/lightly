@@ -40,7 +40,7 @@ class Scheduler:
         "cores", "memory", "dma", "fences",
         "ring_base", "ring_head", "ring_tail",
         "pending_blocks", "running_blocks",
-        "cycles", "halted",
+        "cycles",
     )
 
     def __init__(self, cores, memory, dma, ring_base=0x100):
@@ -54,7 +54,6 @@ class Scheduler:
         self.pending_blocks = []
         self.running_blocks = []
         self.cycles = 0
-        self.halted = False
 
     def new_fence(self):
         fid = len(self.fences)
@@ -115,6 +114,13 @@ class Scheduler:
 
     def _enqueue_dispatch(self, gx, gy, bx, by, warps, kernel_pc,
                           args_addr, fence_id):
+        # FIX: clamp zero dimensions to 1 (the old code used range(0)
+        # which silently enqueued nothing)
+        gx = max(1, gx)
+        gy = max(1, gy)
+        bx = max(1, bx)
+        by = max(1, by)
+        warps = max(1, warps)
         bid = 0
         for by_i in range(by):
             for bx_i in range(bx):
