@@ -11,7 +11,7 @@ Encoding (64-bit):
   [32]    pred   (1)   instruction is predicated
   [31:16] imm16  (16)  signed 16-bit immediate
   [15]    pred_neg (1) invert the predicate
-  [14:0]  imm2   (15)  second immediate (used by MOVLI and TENSOR)
+  [14:0]  imm2   (15)  second immediate (MOVLI, TENSOR)
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ class Opcode(IntEnum):
     TENSOR   = 0x1F
     SYSCALL  = 0x20
     BAR      = 0x21
-    MOVLI    = 0x22   # rd, hi15, lo15  ->  rd = (hi << 15) | lo
+    MOVLI    = 0x22
 
 
 def encode(op: Opcode, rd=0, ra=0, rb=0, rc=0, pd=0,
@@ -200,7 +200,8 @@ class SIMTCore:
         return 1
 
     def _issue(self, w: Warp) -> None:
-        if w.pc + 7 >= self.memory.SIZE:
+        # FIX: GlobalRAM uses .size, not .SIZE
+        if w.pc + 7 >= self.memory.size:
             raise RuntimeError(f"warp {w.warp_id}: PC out of bounds {w.pc:#x}")
 
         word = self.memory.read_u64(w.pc)
