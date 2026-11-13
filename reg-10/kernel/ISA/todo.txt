@@ -1,0 +1,270 @@
+================================================================================
+Re:G — TODO
+================================================================================
+
+Legend:
+  [x]  done
+  [ ]  not started
+  [~]  in progress
+  [?]  blocked / needs decision
+  [!]  known bug
+
+================================================================================
+1. ISA v2 — CORE
+================================================================================
+
+  [x] 64-bit fixed-width encoding
+  [x] 32-bit immediate field (no MOVLI hack, no truncation)
+  [x] Predicate guard field (P0-P7, negated P0-P7, or none)
+  [x] 32 GP registers per lane, r0 = zero
+  [x] 32 FP registers per lane
+  [x] 8 predicate registers per lane
+  [x] Integer ALU: ADD SUB MUL AND OR XOR SHL SHR SGT SLT SEQ
+  [x] Immediate forms for all integer ALU ops
+  [x] FP ALU: ADD SUB MUL FMA MIN MAX
+  [x] Conversion: I2F F2I
+  [x] Predicate: SETP NOTP
+  [x] Control: BRA BRA_DIV CALL RET JR HALT NOP
+  [x] Memory: LDG STG LDGB LDGH LDS STS
+  [x] Intrinsics: VOTE SHFL LANEID
+  [x] Tensor: TENSOR (async, 4-cycle model)
+  [x] SYSCALL (print only)
+  [x] BAR (no-op)
+
+  [ ] Add MEMBAR / FENCE instruction
+  [ ] Add ATOM.ADD / ATOM.CAS for multi-warp coordination
+  [ ] Add SHR.S / SHR.A (arithmetic vs logical shift right)
+  [ ] Add ISGE / ISLE
+  [ ] Add F2I.R (round-to-nearest) and F2I.Z (truncate) variants
+  [ ] Add FABS / FNEG
+  [ ] Add MUL.HI (high 32 bits of 64-bit multiply)
+  [ ] Add BFE / BFI (bit field extract / insert)
+  [ ] Add POPC / CLZ / CTZ
+  [ ] Add FSETP (floating-point predicate compare)
+
+================================================================================
+2. SIMT CORE (cpu.py)
+================================================================================
+
+  [x] Warp model, 32 lanes, lockstep execution
+  [x] Per-lane GP/FP/predicate register files
+  [x] Round-robin warp scheduler
+  [x] Divergence with reconvergence stack
+  [x] Predicate guard on every instruction
+  [x] Lane masking by active_mask
+  [x] Call stack (CALL / RET)
+  [x] Tensor units with busy/ready state
+  [x] PC bounds check (fixed: uses .size, not .SIZE)
+
+  [!] TENSOR result is only written to lane 0 of the warp
+      (should be per-lane or explicitly broadcast)
+  [ ] Tensor unit result should be a real matrix op, not scalar mul
+  [ ] Warp scheduler should prefer warps not waiting on tensor
+  [ ] Add cycle counters per instruction class (for profiling)
+  [ ] Add a proper stall model for LDG latency
+
+================================================================================
+3. MEMORY (ram.py)
+================================================================================
+
+  [x] Global RAM (64 MiB default)
+  [x] Framebuffer as a view into global RAM at 0x10000
+  [x] Scratchpad per core (64 KB)
+  [x] ScratchpadPool
+  [x] u8/u16/u32/u64/f32 read and write
+
+  [ ] Global RAM should be configurable per MemorySystem
+  [ ] Add an allocator (bump allocator) for kernel scratch buffers
+  [ ] Add a debug mode that tracks ownership per region
+  [ ] Add bounds checking option for development builds
+
+================================================================================
+4. DMA (dma.py)
+================================================================================
+
+  [x] Five channels: G2S, S2G, G2F, F2G, S2F
+  [x] Per-channel FIFO queues
+  [x] Fence table for completion tracking
+  [x] Byte-budget per tick per channel
+
+  [ ] Add a sixth channel: S2S (scratchpad to scratchpad across cores)
+  [ ] Add scatter/gather descriptors
+  [ ] Add a channel priority field
+  [ ] Add bandwidth accounting for profiler
+
+================================================================================
+5. SCHEDULER (scheduler.py)
+================================================================================
+
+  [x] Command ring in global RAM at 0x100
+  [x] DISPATCH / COPY / FENCE / PRESENT commands
+  [x] Block dispatch with grid/block dimensions
+  [x] max(1, x) clamp so zero-dim dispatches don't silently skip
+  [x] Per-block fence signalling on completion
+  [x] Multi-core dispatch
+
+  [ ] Add a SET_FB command that actually changes the framebuffer base
+  [ ] Add a RECONFIGURE command (change resolution without resetting)
+  [ ] Add a barrier command that waits for a specific fence before
+      dispatching the next block
+  [ ] Add work-stealing when one core is idle and another has pending blocks
+  [ ] Add a context switch model (save/restore warp state)
+
+================================================================================
+6. ASSEMBLER (assembler.py)
+================================================================================
+
+  [x] Two-pass assembly with label resolution
+  [x] All v2 mnemonics
+  [x] All immediate forms
+  [x] Predicate prefix (@P0 .. @!P7)
+  [x] SETP operand order fixed (PABI)
+  [x] 32-bit immediates (no truncation)
+  [x] Line-numbered error reporting
+  [x] Directives: .org .label .word .string .fill
+
+  [ ] Add a disassembler mode (--disassemble)
+  [ ] Add a listing output mode (--listing, shows PC + hex + source)
+  [ ] Add macro support (.macro / .endm)
+  [ ] Add INCLUDE directive
+  [ ] Add constant definitions (.equ NAME, VALUE)
+  [ ] Add a --no-opt flag placeholder (no optimiser yet)
+  [ ] Add peephole optimiser (MOV rX, rX, constant folding)
+
+================================================================================
+7. DISPLAY (screen.py)
+================================================================================
+
+  [x] Non-blocking tkinter window
+  [x] Native-size window (no scaling)
+  [x] Preallocated RGB staging buffer
+  [x] Strided slice channel swap (BGRA -> RGB)
+  [x] Escape to close, WM_DELETE_WINDOW handled
+
+  [ ] Add a headless PPM mode (--headless)
+  [ ] Add a raw framebuffer dump mode for CI
+  [ ] Add an FPS counter in the window title
+  [ ] Add a pause-on-key option for debugging
+
+================================================================================
+8. EXAMPLE KERNELS
+================================================================================
+
+  [x] kernel.s — gradient fill
+  [ ] triangle.s — single triangle via 3 edges
+  [ ] grid.s — animated game-of-life in a 64x64 tile
+  [ ] plasma.s — sine-based plasma (tests FADD/FMUL)
+  [ ] raytrace.s — one-bounce sphere raytrace (tests TENSOR)
+
+================================================================================
+9. TESTS
+================================================================================
+
+  [ ] Unit tests for cpu.py (per-opcode encode/decode roundtrip)
+  [ ] Unit tests for assembler.py (label resolution, error cases)
+  [ ] Unit tests for ram.py (framebuffer aliasing)
+  [ ] Unit tests for dma.py (fence signalling)
+  [ ] Integration test: assemble kernel.s, run, check pixels
+  [ ] Regression test: the SETP operand order bug
+
+================================================================================
+10. DOCUMENTATION
+================================================================================
+
+  [x] doc.txt — ISA reference v2
+  [x] todo.txt — this file
+  [ ] ISA change log (what changed between v1 and v2)
+  [ ] Kernel programming guide (how to write a warp kernel)
+  [ ] Host driver API reference (once the driver exists)
+  [ ] Architecture overview (block diagram of the card)
+
+================================================================================
+11. HARDWARE / SILICON
+================================================================================
+
+  [?] Choose a process node for the first test chip
+      Candidates: 180nm (cheapest), 130nm, 28nm
+      Decision blocked on funding and foundry access
+
+  [ ] Write RTL for a single SIMT core
+  [ ] Write RTL for a warp scheduler
+  [ ] Write RTL for a GDDR6 PHY stub (for simulation)
+  [ ] Write RTL for the PCIe endpoint
+  [ ] Verification suite for the core
+  [ ] Synthesis script (Yosys + OpenROAD)
+  [ ] Floorplan for a 4-core test chip
+  [ ] Tapeout submission
+
+================================================================================
+12. HOST DRIVER
+================================================================================
+
+  [ ] WDDM display miniport (Windows)
+  [ ] Vulkan ICD (Windows + Linux)
+  [ ] OpenGL 4.x driver (Linux, Mesa backend)
+  [ ] Command ring writer (user-space lib)
+  [ ] Shader compiler backend (SPIR-V -> Re:G ISA)
+  [ ] Test mode signing setup (Windows)
+
+================================================================================
+13. GAME / ECOSYSTEM
+================================================================================
+
+  [~] 11-month jam game (month 2 of 11)
+      [x] Physics engine
+      [x] Physics formula
+      [x] 1.6M LoC modding infrastructure
+      [x] C-API-N network convention
+      [x] .blend native parser
+      [x] 1600-line build tool, 38s clean build
+      [ ] Freeze infrastructure
+      [ ] Content sprint (months 3-6)
+      [ ] Polish sprint (months 7-9)
+      [ ] Ship (months 10-11)
+
+  [ ] Release physics engine publicly
+  [ ] Publish .blend parser
+  [ ] Publish modding language spec
+  [ ] Write game announcement post
+  [ ] Set up community Discord
+
+================================================================================
+14. BUSINESS
+================================================================================
+
+  [x] Price point: 275% of manufacturing cost
+  [x] Manufacturing cost target: £110/card
+  [x] Retail price: £302.50
+  [x] Memory supply: 60 L GDDR6 stash (gift, ~21,000 cards)
+  [x] Product line: 9 SKUs, 2 memory tiers
+  [ ] Find co-founder (hardware / supply chain)
+  [ ] Open-source license decision (CERN-OHL-S? GPL? Apache?)
+  [ ] Business model decision (hardware margin, support contracts,
+      licensing the platform, or a mix)
+  [ ] Funding plan (shuttle run on mature node, ~$50k-$200k)
+  [ ] Company registration
+
+================================================================================
+15. KNOWN BUGS
+================================================================================
+
+  [!] TENSOR result broadcast is lane-0 only (see §2)
+  [!] kernel.s was assembled with the old SETP operand order in the
+      saved binary; rebuild after the fix
+
+================================================================================
+16. NEXT THREE THINGS
+================================================================================
+
+  1. Rebuild kernel.s with the fixed assembler and confirm the gradient
+     renders. Paste the output if it doesn't.
+
+  2. Write triangle.s: three vertices, edge functions, a bounding box,
+     and a simple fill. This is the first real graphics kernel and the
+     gate to calling the renderer "a rasterizer."
+
+  3. Add the unit test for SETP operand order so the fix doesn't regress.
+
+================================================================================
+END OF TODO
+================================================================================
