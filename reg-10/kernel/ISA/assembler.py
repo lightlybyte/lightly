@@ -1,14 +1,5 @@
 """
-assembler.py - Two-pass assembler for the Re:G SIMT ISA, with optimizer.
-
-Features:
-  - Immediate ALU forms: ADDI, SUBI, MULI, ANDI, ORI, XORI, SHLI, SHRI
-  - SETP's compare-mode operand is optional (defaults to 0 = '<')
-  - Optimizer passes:
-      1. unreachable-code elimination (only HALT/RET terminate fallthrough)
-      2. MOV rN, rN elimination
-      3. NOP elimination (unlabeled only)
-  - Runner with optional non-blocking tkinter screen
+assembler.py - Two-pass assembler for the Re:G SIMT ISA. No optimizer.
 """
 
 from __future__ import annotations
@@ -18,10 +9,6 @@ from dataclasses import dataclass
 
 from cpu import Opcode, encode
 
-
-# ============================================================
-# PARSED REPRESENTATION
-# ============================================================
 
 @dataclass(slots=True)
 class ParsedLine:
@@ -50,10 +37,6 @@ class Instr:
     op: Opcode | None = None
     is_label_only: bool = False
 
-
-# ============================================================
-# PARSING
-# ============================================================
 
 def strip_comment(line: str) -> str:
     in_str = False
@@ -102,10 +85,6 @@ def imm_value(tok: str) -> int:
     return int(tok, 0)
 
 
-# ============================================================
-# INSTRUCTION FORMATS
-# ============================================================
-
 INSTR_FORMATS = {
     "NOP":    (Opcode.NOP,    ""),
     "HALT":   (Opcode.HALT,   ""),
@@ -150,40 +129,24 @@ INSTR_FORMATS = {
     "SYSCALL":(Opcode.SYSCALL,"RI"),
 }
 
-BRANCHES = {"BRA", "BRA_DIV"}
-TERMINATORS = {"HALT", "RET"}
+OPTIONAL_TAIL = {"SETP": (1, "0")}
 
-# Trailing operands that may be omitted, with their default literal.
-OPTIONAL_TAIL = {
-    "SETP": (1, "0"),
-}
-
-
-# ============================================================
-# ASSEMBLER
-# ============================================================
 
 class Assembler:
-    def __init__(self, optimize: bool = True):
-        self.labels: dict[str, int] = {}
-        self.pc = 0
+    def __init__(self):
+        self.labels = {}
         self.org = 0
-        self.optimize = optimize
 
     def assemble(self, source: str) -> bytes:
         instrs = self._parse_and_flatten(source)
-        if self.optimize:
-            instrs = _eliminate_unreachable(instrs)
-            instrs = _eliminate_mov_self(instrs)
-            instrs = _eliminate_nop(instrs)
         self._assign_labels(instrs)
         self._encode_all(instrs)
         return self._emit(instrs)
 
-    def _parse_and_flatten(self, source: str) -> list[Instr]:
+    def _parse_and_flatten(self, source):
         parsed = [parse_line(r, i) for i, r in enumerate(source.splitlines(), 1)]
         parsed = [p for p in parsed if p]
-        instrs: list[Instr] = []
+        instrs = []
         for p in parsed:
             if p.mnemonic is None:
                 instrs.append(Instr(mnemonic="", operands=[], line_no=p.line_no,
@@ -194,7 +157,7 @@ class Assembler:
                                     pred_neg=p.pred_neg, label=p.label))
         return instrs
 
-    def _assign_labels(self, instrs: list[Instr]) -> None:
+    def _assign_labels(self, instrs):
         self.labels = {}
         pc = self.org
         for ins in instrs:
@@ -213,7 +176,7 @@ class Assembler:
             elif ins.mnemonic and not ins.mnemonic.startswith('.'):
                 pc += 8
 
-    def _encode_all(self, instrs: list[Instr]) -> None:
+    def _encode_all(self, instrs):
         pc = self.org
         for ins in instrs:
             if ins.is_label_only:
@@ -234,7 +197,7 @@ class Assembler:
                 self._encode_instruction(ins, pc)
                 pc += 8
 
-    def _encode_instruction(self, ins: Instr, pc: int) -> None:
+    def _encode_instruction(self, ins, pc):
         if ins.mnemonic not in INSTR_FORMATS:
             raise SyntaxError(
                 f"line {ins.line_no}: unknown mnemonic {ins.mnemonic!r}")
@@ -288,9 +251,8 @@ class Assembler:
         ins.rd, ins.ra, ins.rb, ins.rc, ins.pd = rd, ra, rb, rc, pd
         ins.imm = imm
 
-    def _emit(self, instrs: list[Instr]) -> bytes:
+    def _emit(self, instrs):
         out = bytearray()
-        pc = self.org
         for ins in instrs:
             if ins.is_label_only:
                 continue
@@ -298,85 +260,25 @@ class Assembler:
                 target = imm_value(ins.operands[0])
                 while len(out) < target:
                     out.append(0)
-                pc = target
                 self.org = target
             elif ins.mnemonic == ".word":
                 out += ins.imm.to_bytes(8, "little")
-                pc += 8
             elif ins.mnemonic == ".string":
                 s = ins.operands[0].encode()
                 out += len(s).to_bytes(4, "little") + s
-                pc += 4 + len(s)
             elif ins.mnemonic == ".fill":
                 out += b"\x00" * (8 * ins.imm)
-                pc += 8 * ins.imm
             elif ins.mnemonic and not ins.mnemonic.startswith('.'):
                 word = encode(ins.op, ins.rd, ins.ra, ins.rb, ins.rc, ins.pd,
                               pred=(ins.pred != 0xFF), pred_neg=ins.pred_neg,
                               imm=ins.imm)
                 out += word.to_bytes(8, "little")
-                pc += 8
         return bytes(out)
 
 
-# ============================================================
-# OPTIMIZER PASSES
-# ============================================================
+def assemble(source: str) -> bytes:
+    return Assembler().assemble(source)
 
-def _eliminate_unreachable(instrs: list[Instr]) -> list[Instr]:
-    """
-    Remove instructions unreachable by fallthrough from entry or by a
-    branch-target label.
-
-    Only HALT and RET terminate fallthrough. BRA / BRA_DIV do not:
-    they redirect control to a label, which the scan already treats as
-    a point where reachability resumes.
-    """
-    targets = set()
-    for ins in instrs:
-        if ins.mnemonic in BRANCHES and ins.operands:
-            targets.add(ins.operands[0])
-
-    out = []
-    reachable = True
-    for ins in instrs:
-        if ins.is_label_only:
-            if ins.label in targets:
-                reachable = True
-            out.append(ins)
-            continue
-        if ins.label in targets:
-            reachable = True
-        if not reachable:
-            continue
-        out.append(ins)
-        if ins.mnemonic in TERMINATORS:
-            reachable = False
-    return out
-
-
-def _eliminate_mov_self(instrs: list[Instr]) -> list[Instr]:
-    return [ins for ins in instrs
-            if not (ins.mnemonic == "MOV" and len(ins.operands) == 2
-                    and ins.operands[0] == ins.operands[1])]
-
-
-def _eliminate_nop(instrs: list[Instr]) -> list[Instr]:
-    return [ins for ins in instrs
-            if not (ins.mnemonic == "NOP" and not ins.label)]
-
-
-# ============================================================
-# PUBLIC
-# ============================================================
-
-def assemble(source: str, optimize: bool = True) -> bytes:
-    return Assembler(optimize=optimize).assemble(source)
-
-
-# ============================================================
-# RUNNER
-# ============================================================
 
 def run_program(code, fb_w, fb_h, origin=0x1000, max_cycles=10_000_000):
     from ram import MemorySystem
@@ -388,22 +290,29 @@ def run_program(code, fb_w, fb_h, origin=0x1000, max_cycles=10_000_000):
     cores = [SIMTCore(core_id=0, num_warps=32, memory=mem.global_ram)]
     dma = DMAEngine(mem.global_ram, mem.scratchpads, mem.framebuffer)
     sched = Scheduler(cores, mem, dma, ring_base=0x100)
-    mem.global_ram.load(code, origin)
+    mem.global_ram.load(code, 0)
 
     fence = sched.new_fence()
     sched.submit_command([1, 1, 1, 1, origin, 0, fence])
     cycles = sched.run(max_cycles=max_cycles)
+
     print(f"executed {cycles} cycles")
     print(f"fence {fence} signalled: {sched.is_fence_signalled(fence)}")
+    print(f"code size: {len(code)} bytes")
+    print(f"fb.base: {hex(mem.framebuffer.base)}")
+
+    fb = mem.framebuffer
+    print(f"pixel(0,0)       = {hex(fb.read_pixel(0, 0))}")
+    print(f"pixel(160,120)   = {hex(fb.read_pixel(160, 120))}")
+    print(f"pixel(319,239)   = {hex(fb.read_pixel(319, 239))}")
+    print(f"ram@fb.base      = {hex(mem.global_ram.read_u32(fb.base))}")
+    print(f"ram@fb.base+4    = {hex(mem.global_ram.read_u32(fb.base + 4))}")
+
     return mem
 
 
-# ============================================================
-# CLI
-# ============================================================
-
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Re:G assembler")
+    ap = argparse.ArgumentParser(description="Re:G assembler (no opt)")
     ap.add_argument("input")
     ap.add_argument("-o", "--output")
     ap.add_argument("--run", action="store_true")
@@ -412,10 +321,7 @@ def main(argv=None):
     ap.add_argument("--origin", type=lambda s: int(s, 0), default=0x1000)
     ap.add_argument("--screen", action="store_true")
     ap.add_argument("--seconds", type=float, default=3.0)
-    ap.add_argument("--no-opt", action="store_true")
     args = ap.parse_args(argv)
-
-    optimize = not args.no_opt
 
     try:
         src = open(args.input, "r", encoding="utf-8").read()
@@ -424,7 +330,7 @@ def main(argv=None):
         return 1
 
     try:
-        code = assemble(src, optimize=optimize)
+        code = assemble(src)
     except SyntaxError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -432,8 +338,7 @@ def main(argv=None):
     out_path = args.output or (args.input.rsplit('.', 1)[0] + ".bin")
     with open(out_path, "wb") as f:
         f.write(code)
-    print(f"assembled {len(code)} bytes "
-          f"({'optimized' if optimize else 'unoptimized'}) -> {out_path}")
+    print(f"assembled {len(code)} bytes -> {out_path}")
 
     if args.run or args.screen:
         try:

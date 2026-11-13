@@ -1,12 +1,24 @@
 """
 cpu.py - SIMT processor core for the Re:G ISA virtual machine.
+
+Encoding (64-bit):
+  [63:58] opcode (6)
+  [57:53] rd     (5)
+  [52:48] ra     (5)
+  [47:43] rb     (5)
+  [42:38] rc     (5)
+  [37:33] pd     (5)   predicate destination
+  [32]    pred   (1)   instruction is predicated
+  [31:16] imm16  (16)  signed 16-bit immediate
+  [15]    pred_neg (1) invert the predicate
+  [14:0]  imm2   (15)  second immediate (used by MOVLI and TENSOR)
 """
 
 from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Optional
-import struct
+
 
 LANES = 32
 NUM_GP = 32
@@ -48,18 +60,27 @@ class Opcode(IntEnum):
     TENSOR   = 0x1F
     SYSCALL  = 0x20
     BAR      = 0x21
+    MOVLI    = 0x22   # rd, hi15, lo15  ->  rd = (hi << 15) | lo
 
 
 def encode(op: Opcode, rd=0, ra=0, rb=0, rc=0, pd=0,
            pred=False, imm=0, imm2=0, pred_neg=False) -> int:
-    return ((op & 0x3F) << 58) | ((rd & 0x1F) << 53) | ((ra & 0x1F) << 48) | \
-           ((rb & 0x1F) << 43) | ((rc & 0x1F) << 38) | ((pd & 0x1F) << 33) | \
-           ((1 if pred else 0) << 32) | ((1 if pred_neg else 0) << 31) | \
-           (((imm >> 0) & 0x7FFF) << 16) | (imm2 & 0xFFFF)
+    return (
+        ((op & 0x3F) << 58)
+        | ((rd & 0x1F) << 53)
+        | ((ra & 0x1F) << 48)
+        | ((rb & 0x1F) << 43)
+        | ((rc & 0x1F) << 38)
+        | ((pd & 0x1F) << 33)
+        | ((1 if pred else 0) << 32)
+        | ((imm & 0xFFFF) << 16)
+        | ((1 if pred_neg else 0) << 15)
+        | (imm2 & 0x7FFF)
+    )
 
 
-def sext15(v: int) -> int:
-    return v - 0x8000 if v & 0x4000 else v
+def sext16(v: int) -> int:
+    return v - 0x10000 if v & 0x8000 else v
 
 
 @dataclass
@@ -185,16 +206,16 @@ class SIMTCore:
         word = self.memory.read_u64(w.pc)
         w.pc += 8
 
-        op = (word >> 58) & 0x3F
-        rd = (word >> 53) & 0x1F
-        ra = (word >> 48) & 0x1F
-        rb = (word >> 43) & 0x1F
-        rc = (word >> 38) & 0x1F
-        pd = (word >> 33) & 0x1F
+        op       = (word >> 58) & 0x3F
+        rd       = (word >> 53) & 0x1F
+        ra       = (word >> 48) & 0x1F
+        rb       = (word >> 43) & 0x1F
+        rc       = (word >> 38) & 0x1F
+        pd       = (word >> 33) & 0x1F
         pred_bit = (word >> 32) & 1
-        pred_neg = (word >> 31) & 1
-        imm = sext15((word >> 16) & 0x7FFF)
-        imm2 = word & 0xFFFF
+        imm      = sext16((word >> 16) & 0xFFFF)
+        pred_neg = (word >> 15) & 1
+        imm2     = word & 0x7FFF
 
         try:
             opcode = Opcode(op)
@@ -221,8 +242,15 @@ class SIMTCore:
 
         if opcode == Opcode.NOP:
             pass
+
         elif opcode == Opcode.HALT:
             self.retire_warp(w.warp_id)
+
+        elif opcode == Opcode.MOVLI:
+            full = (imm2 << 15) | (imm & 0x7FFF)
+            for l in exec_lanes:
+                w.set_gp(rd, l, full & 0xFFFFFFFF)
+
         elif opcode == Opcode.LDG:
             for l in exec_lanes:
                 w.set_gp(rd, l, self.memory.read_u32(w.get_gp(ra, l) + imm))
@@ -235,12 +263,14 @@ class SIMTCore:
         elif opcode == Opcode.STS:
             for l in exec_lanes:
                 self.scratchpad.write_u32(w.get_gp(ra, l) + imm, w.get_gp(rd, l))
+
         elif opcode == Opcode.MOV:
             for l in exec_lanes:
                 w.set_gp(rd, l, w.get_gp(ra, l))
         elif opcode == Opcode.MOVI:
             for l in exec_lanes:
                 w.set_gp(rd, l, imm & 0xFFFFFFFF)
+
         elif opcode == Opcode.IADD:
             for l in exec_lanes:
                 w.set_gp(rd, l, w.get_gp(ra, l) + b_of(l))
@@ -265,6 +295,7 @@ class SIMTCore:
         elif opcode == Opcode.SHR:
             for l in exec_lanes:
                 w.set_gp(rd, l, w.get_gp(ra, l) >> (b_of(l) & 31))
+
         elif opcode == Opcode.FADD:
             for l in exec_lanes:
                 w.set_fp(rd, l, w.get_fp(ra, l) + w.get_fp(rb, l))
@@ -289,6 +320,7 @@ class SIMTCore:
         elif opcode == Opcode.F2I:
             for l in exec_lanes:
                 w.set_gp(rd, l, int(w.get_fp(ra, l)))
+
         elif opcode == Opcode.SETP:
             for l in exec_lanes:
                 if imm == 0:
@@ -299,9 +331,11 @@ class SIMTCore:
                     w.pred[pd] = w.get_gp(ra, l) != w.get_gp(rb, l)
                 else:
                     w.pred[pd] = True
+
         elif opcode == Opcode.BRA:
             if all(w.pred[l] for l in exec_lanes):
                 w.pc = (w.pc + (imm << 3)) & 0xFFFFFFFF
+
         elif opcode == Opcode.BRA_DIV:
             taken = [l for l in exec_lanes if w.pred[l]]
             not_taken = [l for l in exec_lanes if not w.pred[l]]
@@ -313,8 +347,10 @@ class SIMTCore:
                 w.reconvergence.append((w.pc, not_taken))
                 w.active_mask = sum(1 << l for l in taken)
                 w.pc = (w.pc + (imm << 3)) & 0xFFFFFFFF
+
         elif opcode == Opcode.RET:
             self.retire_warp(w.warp_id)
+
         elif opcode == Opcode.VOTE:
             mask = 0
             for l in exec_lanes:
@@ -331,12 +367,14 @@ class SIMTCore:
                 v = 1 if mask == w.active_mask else 0
                 for l in exec_lanes:
                     w.set_gp(rd, l, v)
+
         elif opcode == Opcode.SHFL:
             src = imm & 0x1F
             for l in exec_lanes:
                 w.set_gp(rd, l, w.get_gp(ra, src))
+
         elif opcode == Opcode.TENSOR:
-            unit = (imm >> 8) & 0x3
+            unit = (imm2 >> 8) & 0x3
             if unit >= len(self.tensor_units):
                 raise RuntimeError(f"invalid tensor unit {unit}")
             tu = self.tensor_units[unit]
@@ -349,8 +387,10 @@ class SIMTCore:
             tu.dest_fp = rd
             tu.dest_warp = w.warp_id
             tu.result = w.get_fp(ra, exec_lanes[0]) * w.get_fp(rb, exec_lanes[0])
+
         elif opcode == Opcode.BAR:
             pass
+
         elif opcode == Opcode.SYSCALL:
             if imm == 1:
                 for l in exec_lanes:
@@ -358,6 +398,7 @@ class SIMTCore:
             elif imm == 2:
                 for l in exec_lanes:
                     print(w.get_fp(ra, l))
+
         else:
             raise RuntimeError(f"warp {w.warp_id}: unhandled {opcode.name}")
 
