@@ -37,8 +37,22 @@ static inline void sp_write_u32(reg10_scratchpad_t *p, uint32_t addr,
 }
 
 /* ------------------------------------------------------------------ */
-/* Memory system                                                      */
+/* Full type definitions needed by struct reg10_memory_system         */
 /* ------------------------------------------------------------------ */
+
+struct reg10_global_ram {
+    uint8_t *mem;
+    size_t   size;
+};
+
+struct reg10_framebuffer {
+    uint8_t *mem;
+    uint32_t base;
+    uint32_t width;
+    uint32_t height;
+    uint32_t stride;
+    uint32_t size;
+};
 
 struct reg10_memory_system {
     reg10_global_ram_t   *global_ram;
