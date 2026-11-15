@@ -21,12 +21,14 @@ CORE_SRC := \
 	common/reg10_mem.c \
 	common/reg10_cpu.c \
 	common/reg10_driver.c \
+	common/reg10_asm.c \
 	$(PLATFORM_SRC)
 
 LIB := libreg10.a
 TEST := reg10_test$(EXE)
+ASM_TOOL := reg10_as$(EXE)
 
-.PHONY: all clean test
+.PHONY: all clean test asm
 
 all: $(LIB)
 
@@ -39,5 +41,8 @@ $(LIB): $(CORE_SRC:.c=.o)
 test: $(LIB)
 	$(CC) $(CFLAGS) -o $(TEST) test/reg10_test.c $(LIB) $(LDLIBS)
 
+asm: reg10_asm.c
+	$(CC) $(CFLAGS) -o $(ASM_TOOL) common/reg10_asm.c $(LDLIBS)
+
 clean:
-	rm -f common/*.o platform/*/*.o $(LIB) $(TEST)
+	rm -f common/*.o platform/*/*.o $(LIB) $(TEST) $(ASM_TOOL)

@@ -163,4 +163,32 @@ typedef enum reg10_opcode {
 #define REG10_FB_MAX_W 3840
 #define REG10_FB_MAX_H 2160
 
+/* =========================================================================
+ * Graphics-specific additions (expanded ISA)
+ * ========================================================================= */
+
+/* Texture sampling modes for TEX opcode */
+#define REG10_TEX_NEAREST     0   /* nearest-neighbor */
+#define REG10_TEX_LINEAR      1   /* bilinear */
+#define REG10_TEX_LINEAR_MIP  2   /* trilinear */
+
+/* Blend modes for BLEND opcode */
+#define REG10_BLEND_NONE      0   /* overwrite */
+#define REG10_BLEND_ALPHA     1   /* src_alpha * src + (1-src_alpha) * dst */
+#define REG10_BLEND_ADD       2   /* src + dst */
+#define REG10_BLEND_MULTIPLY  3   /* src * dst */
+
+/* Extended opcodes (0x80-0x8F) */
+#define REG10_OP_TEX      0x80   /* texture sample */
+#define REG10_OP_DDX      0x81   /* ddx derivative */
+#define REG10_OP_DDY      0x82   /* ddy derivative */
+#define REG10_OP_KILL     0x83   /* fragment discard */
+#define REG10_OP_BLEND    0x84   /* blend pixel at framebuffer */
+#define REG10_OP_LERP     0x85   /* interpolate varyings (barycentric) */
+#define REG10_OP_DEPTH    0x86   /* depth test */
+#define REG10_OP_STENCIL  0x87   /* stencil test */
+
+/* Kernel entry origin */
+#define REG10_KERNEL_ORIGIN 0x1000
+
 #endif /* REG10_ISA_H */

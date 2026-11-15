@@ -583,6 +583,117 @@ int reg10_core_step(reg10_core_t *core)
     case REG10_OP_BAR:
         break;
 
+    case REG10_OP_TEX: {
+        int filter = (int)imm & 3;
+        (void)filter;
+        for (int i = 0; i < num_exec; i++) {
+            int l = exec_lanes[i];
+            float u = warp_get_fp(w, (int)ra, l);
+            float v = warp_get_fp(w, (int)rb, l);
+            int tu = (int)(u * 16.0f) & 1;
+            int tv = (int)(v * 16.0f) & 1;
+            uint32_t texel = ((tu ^ tv) ? 0xFFFFFFFFu : 0xFF000000u);
+            warp_set_gp(w, (int)rd, l, texel);
+        }
+        break;
+    }
+
+    case REG10_OP_DDX:
+        for (int i = 0; i < num_exec; i++) {
+            int l = exec_lanes[i];
+            int right = (l + 1) & 31;
+            float val = warp_get_fp(w, (int)ra, l);
+            float nxt = warp_get_fp(w, (int)ra, right);
+            warp_set_fp(w, (int)rd, l, nxt - val);
+        }
+        break;
+
+    case REG10_OP_DDY:
+        for (int i = 0; i < num_exec; i++) {
+            int l = exec_lanes[i];
+            float val = warp_get_fp(w, (int)ra, l);
+            warp_set_fp(w, (int)rd, l, 0.0f);
+        }
+        break;
+
+    case REG10_OP_KILL:
+        for (int i = 0; i < num_exec; i++) {
+            int l = exec_lanes[i];
+            if (warp_get_gp(w, (int)ra, l) != 0) {
+                w->active_mask &= ~(1u << l);
+            }
+        }
+        num_exec = 0;
+        if (pred_reg == REG10_PRED_NONE) {
+            num_exec = active_lanes(w, exec_lanes, REG10_LANES);
+        }
+        if (num_exec == 0) {
+            w->state = 0;
+            return 1;
+        }
+        break;
+
+    case REG10_OP_LERP:
+        for (int i = 0; i < num_exec; i++) {
+            int l = exec_lanes[i];
+            float v0 = warp_get_fp(w, (int)ra, l);
+            float v1 = warp_get_fp(w, (int)rb, l);
+            float w0 = warp_get_fp(w, 31, l);
+            float w1 = warp_get_fp(w, 30, l);
+            float w2 = 1.0f - w0 - w1;
+            float v2 = *(float*)&imm;
+            warp_set_fp(w, (int)rd, l, w0 * v0 + w1 * v1 + w2 * v2);
+        }
+        break;
+
+    case REG10_OP_DEPTH:
+        for (int i = 0; i < num_exec; i++) {
+            int l = exec_lanes[i];
+            float depth = warp_get_fp(w, (int)ra, l);
+            uint32_t db_addr = warp_get_gp(w, (int)rb, l);
+            float stored = *(float*)&mem_read_u32(core->mem, db_addr);
+            if (depth > stored) {
+                w->active_mask &= ~(1u << l);
+            } else {
+                mem_write_u32(core->mem, db_addr, *(uint32_t*)&depth);
+            }
+        }
+        num_exec = active_lanes(w, exec_lanes, REG10_LANES);
+        if (num_exec == 0) {
+            w->state = 0;
+            return 1;
+        }
+        break;
+
+    case REG10_OP_STENCIL:
+        for (int i = 0; i < num_exec; i++) {
+            int l = exec_lanes[i];
+            uint32_t ref = (uint32_t)imm;
+            uint32_t st_addr = warp_get_gp(w, (int)rb, l);
+            uint32_t st_val = mem_read_u32(core->mem, st_addr);
+            uint32_t cmp = warp_get_gp(w, (int)ra, l);
+            int pass = 0;
+            switch ((int)(cmp & 7)) {
+            case 0: pass = (st_val == ref); break;
+            case 1: pass = (st_val != ref); break;
+            case 2: pass = (st_val <  ref); break;
+            case 3: pass = (st_val <= ref); break;
+            case 4: pass = (st_val >  ref); break;
+            case 5: pass = (st_val >= ref); break;
+            case 6: pass = 1; break;
+            case 7: pass = 0; break;
+            }
+            if (!pass) {
+                w->active_mask &= ~(1u << l);
+            }
+        }
+        num_exec = active_lanes(w, exec_lanes, REG10_LANES);
+        if (num_exec == 0) {
+            w->state = 0;
+            return 1;
+        }
+        break;
+
     default:
         w->state = 2;
         break;

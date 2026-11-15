@@ -150,3 +150,48 @@ uint8_t *fb = reg10_device_get_fb(dev, &fb_size);
 - Memory allocated via `reg10_mem_alloc()` uses a fixed GPU address
   (`0x1000`); a real bump allocator is a TODO.
 - No actual GPU hardware — this is a VM emulator running on the host CPU.
+
+## Assembler (`reg10_asm.h` / `reg10_asm.c`)
+
+A two-pass assembler for the full Re:G ISA v2 (including graphics extensions).
+
+### Supported directives
+- `.org ADDR` - Set assembly origin (pads output to ADDR)
+- `.label NAME` - Define a label at the current PC
+- `.word VALUE` - Emit a raw 64-bit word
+- `.string "TEXT"` - Emit a length-prefixed UTF-8 string
+- `.fill N` - Emit N zero 64-bit words
+
+### Syntax
+```
+[@P[!]N]  MNEMONIC   operands...   ; comment
+```
+
+Examples:
+```
+@P0   IADD r3, r1, r2      ; predicated on P0 true
+@!P0  STG r3, r4, 0        ; predicated on P0 false
+MOVI  r10, 0x10000         ; load immediate
+LDG   r5, [r10+0]          ; global load
+STG   r5, [r10+4]          ; global store
+TEX   r20, r10, r11, 1     ; texture sample (LINEAR)
+BLEND r12, r13, 1          ; alpha blend
+DEPTH r14, r15             ; depth test
+KILL  r16                  ; fragment discard
+```
+
+### Building the assembler tool
+```bash
+make asm
+./reg10_as kernels/gradient.s -o gradient.bin
+```
+
+## Example Kernels
+
+### `kernels/gradient.s`
+Gradient fill kernel ported from the ISA doc example. Renders a horizontal/vertical
+gradient where red varies with X, green with Y, blue fixed at 0x80.
+
+### `kernels/fragment.s`
+Fragment shader demonstrating graphics extensions: texture sampling (TEX),
+alpha blending (BLEND), depth testing (DEPTH), and fragment discard (KILL).
