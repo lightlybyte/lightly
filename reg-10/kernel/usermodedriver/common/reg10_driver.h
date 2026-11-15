@@ -50,3 +50,51 @@ reg10_device_t *reg10_device_open(uint32_t index);
 void reg10_device_close(reg10_device_t *dev);
 reg10_result_t reg10_device_get_info(reg10_device_t *dev,
                                      reg10_device_info_t *info);
+
+reg10_context_t *reg10_context_create(reg10_device_t *dev);
+void             reg10_context_destroy(reg10_context_t *ctx);
+reg10_queue_t   *reg10_context_get_queue(reg10_context_t *ctx);
+
+reg10_mem_t *reg10_mem_alloc(reg10_context_t *ctx, size_t size,
+                             uint32_t flags);
+void         reg10_mem_free(reg10_mem_t *mem);
+void *reg10_mem_map(reg10_mem_t *mem);
+void  reg10_mem_unmap(reg10_mem_t *mem);
+uint64_t reg10_mem_get_gpu_addr(reg10_mem_t *mem);
+reg10_result_t reg10_mem_flush(reg10_mem_t *mem);
+
+reg10_shader_t *reg10_shader_create(reg10_context_t *ctx,
+                                    const uint64_t *code, size_t num_words);
+void reg10_shader_destroy(reg10_shader_t *shader);
+
+reg10_fence_t *reg10_fence_create(reg10_context_t *ctx);
+void           reg10_fence_destroy(reg10_fence_t *fence);
+reg10_result_t reg10_fence_wait(reg10_fence_t *fence, uint64_t timeout_ms);
+
+reg10_result_t reg10_queue_dispatch(reg10_queue_t   *queue,
+                                    reg10_shader_t  *shader,
+                                    uint32_t         grid_x,
+                                    uint32_t         grid_y,
+                                    uint32_t         block_x,
+                                    uint32_t         block_y,
+                                    uint32_t         warps_per_block,
+                                    uint64_t         args_addr,
+                                    reg10_fence_t   *fence);
+reg10_result_t reg10_queue_copy(reg10_queue_t *queue,
+                                uint64_t       src_addr,
+                                uint64_t       dst_addr,
+                                size_t         length,
+                                reg10_fence_t *fence);
+reg10_result_t reg10_queue_present(reg10_queue_t *queue);
+reg10_result_t reg10_queue_submit(reg10_queue_t *queue);
+
+reg10_result_t reg10_device_set_framebuffer(reg10_device_t *dev,
+                                            uint32_t width, uint32_t height);
+uint8_t *reg10_device_get_fb(reg10_device_t *dev, size_t *out_size);
+reg10_result_t reg10_device_run(reg10_device_t *dev, uint64_t max_cycles);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* REG10_DRIVER_H */
