@@ -1,10 +1,28 @@
 ================================================================================
-Re:G ISA v2 — Instruction Set Reference
+Re:G ISA v2 — Instruction Set Architecture Specification
 ================================================================================
+
+Version:      2.0
+Status:       Specification draft (not yet silicon-verified)
 Architecture: SIMT (Single Instruction, Multiple Threads)
 Execution:    Warp-based, 32 lanes per warp
-Encoding:     64-bit fixed width
-Endianness:   Little-endian
+Encoding:     64-bit fixed width, little-endian
+Implementations: Software VM (reg-10/kernel/usermodedriver), FPGA target TBD
+
+================================================================================
+IMPLEMENTATION STATUS LEGEND
+================================================================================
+
+Every feature in this document carries one of the following status tags:
+
+  [IMPLEMENTED+TESTED]   Feature exists in the software VM and has automated
+                         test coverage.
+  [IMPLEMENTED]          Feature exists in the software VM but lacks automated
+                         test coverage.
+  [SPECIFIED]            Feature is defined here but not yet implemented in
+                         any codebase.
+  [FUTURE]               Feature is planned for a later ISA version or
+                         hardware revision; not part of v2.
 
 ================================================================================
 1. MACHINE MODEL
@@ -12,280 +30,37 @@ Endianness:   Little-endian
 
 Registers
 ---------
-  r0       Zero register (reads 0, writes ignored)
-  r1-r31   General-purpose 32-bit integer registers, per-lane
-  f0-f31   Floating-point registers, per-lane
-  p0-p7    Predicate registers, per-lane, 1 bit each
-  pc       Program counter, per-warp
-  laneid   Lane index 0-31, per-lane, read-only via LANEID
+
+  r0      Zero register (reads 0, writes ignored), per-lane            [IMPLEMENTED+TESTED]
+  r1-r31  General-purpose 32-bit integer registers, per-lane           [IMPLEMENTED+TESTED]
+  f0-f31  Floating-point registers, per-lane, IEEE 754 binary32        [IMPLEMENTED+TESTED]
+  p0-p7   Predicate registers, per-lane, 1 bit each                    [IMPLEMENTED+TESTED]
+  pc      Program counter, per-warp, byte-addressed                    [IMPLEMENTED+TESTED]
+  laneid  Lane index 0-31, per-lane, read-only via LANEID              [IMPLEMENTED+TESTED]
+
+Predicate register note: p0-p7 are the ONLY architecturally visible
+predicate registers. The 4-bit pd field in SETP/NOTP encodes P0-P15,
+but values 8-15 are reserved and cause an illegal-operand fault in the
+VM. The hardware may expand to 16 predicates in v3; v2 software must
+not use pd >= 8.
 
 Warp state
 ----------
+
   Each warp executes in lockstep across all active lanes.
   Active lanes are tracked by a 32-bit active_mask.
   Inactive lanes (masked off by divergence or the initial launch)
   do not execute; their registers are not modified.
+  Maximum warps per core: 32 (REG10_NUM_WARPS_PER_CORE).
 
 Memory spaces
 -------------
+
   Global RAM     Shared across all cores. LDG/STG address this.
+                   Size: 64 MiB (REG10_GLOBAL_RAM_SIZE).
   Scratchpad     Per-core, software-managed. LDS/STS address this.
-  No caches. No coherence. The kernel is responsible for ordering.
-
-================================================================================
-2. INSTRUCTION ENCODING (64 bits)
-================================================================================
-
-  [63:57]  opcode     7 bits   0-127 (v2 uses the full 7-bit field; opcodes
-                                >= 64 such as SETP, BRA, TENSOR, etc. now
-                                encode correctly instead of wrapping)
-  [56:52]  rd         5 bits   destination register
-  [51:47]  ra         5 bits   source A
-  [46:42]  rb         5 bits   source B
-  [41:37]  pred_reg   5 bits   predicate guard (see below)
-  [36:33]  pd         4 bits   predicate destination P0-P15 (SETP / NOTP)
-  [32]     use_imm    1 bit    1 = operand B is the 32-bit immediate
-  [31:0]   imm32      32 bits  signed or unsigned depending on use
-
-Predicate guard field (pred_reg)
----------------------------------
-  0-7      Execute only on lanes where P0-P7 is true.
-  8-15     Execute only on lanes where P0-P7 is false (negated).
-  31       No predicate guard. All active lanes execute.
-
-================================================================================
-3. OPCODES
-================================================================================
-
-Control
--------
-  0x00  NOP
-  0x01  HALT                 Retire the warp.
-  0x02  RET                  Return from CALL, or retire if the call stack is empty.
-
-Memory
-------
-  0x10  LDG   rd, [ra+imm]   32-bit load from global RAM
-  0x11  STG   rd, [ra+imm]   32-bit store to global RAM
-  0x12  LDGB  rd, [ra+imm]   byte load
-  0x13  LDGH  rd, [ra+imm]   16-bit load
-  0x14  LDS   rd, [ra+imm]   scratchpad load
-  0x15  STS   rd, [ra+imm]   scratchpad store
-
-Integer ALU
------------
-  0x20  MOV    rd, ra
-  0x21  MOVI   rd, imm
-  0x22  IADD   rd, ra, rb | imm
-  0x23  ISUB   rd, ra, rb | imm
-  0x24  IMUL   rd, ra, rb | imm
-  0x25  IAND   rd, ra, rb | imm
-  0x26  IOR    rd, ra, rb | imm
-  0x27  IXOR   rd, ra, rb | imm
-  0x28  SHL    rd, ra, rb | imm
-  0x29  SHR    rd, ra, rb | imm
-  0x2A  ISGT   rd, ra, rb | imm    1 if ra > b else 0
-  0x2B  ISLT   rd, ra, rb | imm    1 if ra < b else 0
-  0x2C  ISEQ   rd, ra, rb | imm    1 if ra == b else 0
-
-Floating-point ALU
-------------------
-  0x30  FADD   fd, fa, fb
-  0x31  FSUB   fd, fa, fb
-  0x32  FMUL   fd, fa, fb
-  0x33  FFMA   fd, fa, fb          fd = fa * fb + fd
-  0x34  FMIN   fd, fa, fb
-  0x35  FMAX   fd, fa, fb
-  0x36  I2F    fd, ra
-  0x37  F2I    rd, fa
-
-Predicate
----------
-  0x40  SETP   pd, ra, rb, imm
-           imm = 0   pd = ra < rb
-           imm = 1   pd = ra == rb
-           imm = 2   pd = ra != rb
-           imm = 3   pd = unsigned(ra) < unsigned(rb)
-           imm = any other value: pd = false
-  0x41  NOTP   pd, pa
-
-Control flow
-------------
-  0x50  BRA    label         PC += imm (imm = target - (pc+8))
-  0x51  BRA_DIV label        Divergent branch with reconvergence
-  0x52  CALL   label         Push PC, PC += imm
-  0x53  JR     ra            PC = ra
-
-Warp intrinsics
----------------
-  0x60  VOTE   rd, imm        imm=0 ballot, 1 any, 2 all
-  0x61  SHFL   rd, ra, imm    Warp shuffle: rd[l] = ra[imm & 31]
-  0x62  LANEID rd             rd = lane index (0..31)
-
-Tensor
-------
-  0x70  TENSOR fd, fa, fb, imm    Async tensor FMA. imm & 3 = unit index.
-                                   fd[l] = fa[l] * fb[l] + fd[l] for every
-                                   active lane l. The warp stalls until the
-                                   unit finishes (4-cycle latency).
-
-Misc
-----
-  0x7E  SYSCALL imm           imm=1 print gp[ra], imm=2 print fp[ra]
-  0x7F  BAR                   Warp barrier (no-op in the current model)
-
-================================================================================
-4. ASSEMBLY SYNTAX
-================================================================================
-
-  [@P[!]N]   MNEMONIC   operands...   ; comment
-
-  Labels are declared as `name:` on their own line.
-  Immediate values can be decimal, hex (0x...) or negative.
-  Registers: rN, fN, pN where N is 0-31 (pN only 0-7).
-
-Predication examples
---------------------
-  @P0   IADD r3, r1, r2      execute only on lanes where P0 is true
-  @!P0  STG  r3, r4, 0       execute only on lanes where P0 is false
-        IADD r3, r1, r2      unpredicated, all active lanes execute
-
-Optional operands
------------------
-  None in v2. Every instruction takes exactly its declared operand count.
-
-================================================================================
-5. ASSEMBLER DIRECTIVES
-================================================================================
-
-  .org    ADDR          Set assembly origin. Pads the output to ADDR.
-  .label  NAME          Define a label at the current PC.
-  .word   VALUE         Emit a raw 64-bit word.
-  .string "TEXT"        Emit a length-prefixed UTF-8 string.
-  .fill   N             Emit N zero 64-bit words.
-
-================================================================================
-6. KERNEL ENTRY AND EXIT
-================================================================================
-
-  The host driver submits a DISPATCH command to the command ring:
-
-    word 0  opcode = 1 (DISPATCH)
-    word 1  grid  (grid_x | grid_y << 16)
-    word 2  block (block_x | block_y << 16)
-    word 3  warps_per_block
-    word 4  kernel_pc
-    word 5  args_addr
-    word 6  fence_id
-
-  The scheduler enqueues one Block per (grid_x, grid_y, block_x, block_y)
-  tuple. Each Block launches `warps_per_block` warps on the target core.
-  Every warp starts at `kernel_pc` with all 32 lanes active.
-
-  A block retires when every warp in it has executed HALT or RET (with an
-  empty call stack). On retirement, the block's fence is signalled.
-
-================================================================================
-7. MEMORY ACCESS
-================================================================================
-
-  STG/LDG address:    gp[ra] + imm     (imm is sign-extended)
-  STS/LDS address:    gp[ra] + imm, masked to the scratchpad size
-
-  The framebuffer lives in global RAM at a fixed base. The current runner
-  places it at 0x10000. Kernels compute pixel offsets as:
-
-      byte_offset = y * (width * 4) + x * 4
-
-  and store the BGRA32 pixel with STG at (fb_base + byte_offset).
-
-================================================================================
-8. DIVERGENCE AND RECONVERGENCE
-================================================================================
-
-  BRA executes only if all executing lanes agree on the predicate.
-  If lanes disagree, use BRA_DIV.
-
-  BRA_DIV: lanes where the predicate is true take the branch; lanes where
-  it is false are pushed onto the reconvergence stack and masked off. When
-  the warp reaches the reconvergence PC (the instruction after the branch),
-  the masked lanes are restored and execution continues in lockstep.
-
-  The reconvergence stack is LIFO and is cleared on warp launch.
-
-================================================================================
-9. EXAMPLE — GRADIENT FILL
-================================================================================
-
-  start:
-      MOVI r10, 0x10000        ; framebuffer base
-      MOVI r13, 320            ; width
-      MOVI r14, 240            ; height
-
-      MOVI r2, 0               ; y = 0
-  yloop:
-      MOVI r1, 0               ; x_base = 0
-  xloop:
-      LANEID r11               ; r11 = lane index 0..31
-      IADD   r15, r1, r11      ; x = x_base + lane
-
-      MOVI   r19, 0xFF
-      IAND   r16, r15, r19     ; r = x & 0xFF
-      IAND   r17, r2, r19      ; g = y & 0xFF
-      SHLI   r17, r17, 16
-      IOR    r16, r16, r17
-      MOVI   r17, 0xFF8080
-      IOR    r16, r16, r17     ; color = 0xFF8080 | r | (g << 16)
-
-      MOVI   r19, 1280
-      IMUL   r17, r2, r19      ; y * 1280
-      SHLI   r19, r15, 2       ; x * 4
-      IADD   r17, r17, r19
-      IADD   r17, r10, r17     ; fb_base + offset
-      STG    r16, r17, 0
-
-      ADDI   r1, r1, 32        ; x_base += 32
-      SETP   p0, r1, r13, 0    ; p0 = (r1 < 320)
-      @P0    BRA xloop
-
-      ADDI   r2, r2, 1         ; y += 1
-      SETP   p0, r2, r14, 0    ; p0 = (r2 < 240)
-      @P0    BRA yloop
-
-      HALT
-
-  Assemble and run:
-      python assembler.py kernel.s --run --fb 320x240 --screen --seconds 5
-
-  Expected: a horizontal/vertical gradient. Red varies with x, green with
-  y, blue fixed at 0x80.
-
-================================================================================
-10. KNOWN LIMITATIONS AND FUTURE WORK
-================================================================================
-
-  - No cache. Every LDG/STG goes to global RAM.
-  - No memory barriers. Ordering is the kernel's responsibility.
-  - No atomics. Multi-warp coordination requires fences at the scheduler.
-  - No texture units. Texture sampling is software.
-  - Scratchpad is 64 KB per core. Larger working sets go to global RAM.
-  - Tensor units are modelled as fixed 4-cycle latency. Real hardware would
-    be longer and pipelined.
-  - SYSCALL only supports print. Real debug channels would use a ring.
-
-================================================================================
-11. FILE LAYOUT
-================================================================================
-
-  cpu.py          SIMT core, ISA decoding, execution, tensor units
-  ram.py          Global RAM, framebuffer view, scratchpad pool
-  dma.py          Async copy engine (global <-> scratchpad, global <-> FB)
-  scheduler.py    Command ring, block dispatch, warp lifecycle
-  assembler.py    Two-pass assembler and CLI runner
-  screen.py       Non-blocking tkinter display
-  kernel.s        Example kernel source
-  doc.txt         This file
-
-================================================================================
-END OF DOCUMENT
-================================================================================
+                   Size: 64 KiB per core (REG10_SCRATCHPAD_SIZE).
+                   Addresses wrap modulo scratchpad size (architectural
+                   behaviour, not a bug; see section 7).
+  No caches. No hardware coherence. The kernel is responsible for
+  ordering; see section 8 (Memory Model) for fence semantics.
