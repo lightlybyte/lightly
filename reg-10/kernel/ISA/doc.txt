@@ -29,7 +29,7 @@ Every feature in this document carries one of the following status tags:
 ================================================================================
 
 Registers
----------
+----------
 
   r0      Zero register (reads 0, writes ignored), per-lane            [IMPLEMENTED+TESTED]
   r1-r31  General-purpose 32-bit integer registers, per-lane           [IMPLEMENTED+TESTED]
