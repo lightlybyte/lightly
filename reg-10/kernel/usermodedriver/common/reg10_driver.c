@@ -172,6 +172,7 @@ reg10_context_t *reg10_context_create(reg10_device_t *dev)
     reg10_context_t *ctx = calloc(1, sizeof(*ctx));
     if (!ctx) return NULL;
     ctx->dev = dev;
+    ctx->pending_fence = NULL;
     return ctx;
 }
 
@@ -334,7 +335,9 @@ reg10_result_t reg10_queue_dispatch(reg10_queue_t *queue,
         reg10_core_launch_warp(core, (int)i, origin);
     }
 
-    /* Do NOT signal fence here - it will be signalled after reg10_device_run() completes */
+    /* Store fence to be signalled after reg10_device_run() completes */
+    reg10_context_t *ctx = queue->ctx;
+    ctx->pending_fence = fence;
     return REG10_SUCCESS;
 }
 
@@ -370,6 +373,12 @@ reg10_result_t reg10_queue_submit(reg10_queue_t *queue)
 {
     if (!queue || !queue->ctx || !queue->ctx->dev)
         return REG10_ERROR_INVALID;
-    return reg10_device_run(queue->ctx->dev, 10000000);
+    reg10_result_t r = reg10_device_run(queue->ctx->dev, 10000000);
+    /* Signal any pending fence now that all warps have completed */
+    if (queue->ctx->pending_fence) {
+        queue->ctx->pending_fence->signalled = 1;
+        queue->ctx->pending_fence = NULL;
+    }
+    return r;
 }
 

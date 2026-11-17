@@ -65,6 +65,3 @@ common/reg10_asm.c: In function 'assemble_instr':
 common/reg10_asm.c:172:9: warning: unused variable 'err' [-Wunused-variable]
   172 |     int err=0, is_branch=0; char *branch_label=NULL;
       |         ^~~
-C:/MinGW/bin/../lib/gcc/x86_64-w64-mingw32/13.2.0/../../../../x86_64-w64-mingw32/bin/ld.exe: C:/MinGW/bin/../lib/gcc/x86_64-w64-mingw32/13.2.0/../../../../x86_64-w64-mingw32/lib/../lib/libmingw32.a(lib64_libmingw32_a-crtexewin.o):crtexewin.c:(.text+0x130): undefined reference to `WinMain'
-collect2.exe: error: ld returned 1 exit status
-mingw32-make: *** [makefile:51: asm] Error 1
