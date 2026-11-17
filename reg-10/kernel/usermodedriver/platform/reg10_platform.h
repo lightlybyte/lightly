@@ -1,6 +1,8 @@
 #ifndef REG10_PLATFORM_H
 #define REG10_PLATFORM_H
 
+#include <stdint.h>
+
 /* Platform-specific hooks (display, threading). Minimal for usermode VM. */
 
 #ifdef __cplusplus

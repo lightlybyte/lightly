@@ -2,14 +2,20 @@
 # Builds the core driver library and a test program.
 # Works on Linux (make) and Windows (mingw32-make).
 
-CC      ?= gcc
-CFLAGS  := -Wall -Wextra -O2 -std=c11 -Icommon
+CC      := gcc
+CFLAGS  := -Wall -Wextra -O2 -std=c11 -Icommon -Iplatform
 LDFLAGS :=
 LDLIBS  := -lm
 
 # Detect platform
 UNAME_S := $(shell uname -s 2>/dev/null || echo Windows_NT)
-ifeq ($(UNAME_S),Windows_NT)
+ifeq ($(findstring MINGW,$(UNAME_S)),MINGW)
+    PLATFORM_SRC := platform/windows/reg10_platform.c
+    EXE := .exe
+else ifeq ($(findstring MSYS,$(UNAME_S)),MSYS)
+    PLATFORM_SRC := platform/windows/reg10_platform.c
+    EXE := .exe
+else ifeq ($(UNAME_S),Windows_NT)
     PLATFORM_SRC := platform/windows/reg10_platform.c
     EXE := .exe
 else
@@ -41,7 +47,7 @@ $(LIB): $(CORE_SRC:.c=.o)
 test: $(LIB)
 	$(CC) $(CFLAGS) -o $(TEST) test/reg10_test.c $(LIB) $(LDLIBS)
 
-asm: reg10_asm.c
+asm: common/reg10_asm.c
 	$(CC) $(CFLAGS) -o $(ASM_TOOL) common/reg10_asm.c $(LDLIBS)
 
 clean:

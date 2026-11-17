@@ -1,0 +1,70 @@
+rm -f common/*.o platform/*/*.o libreg10.a reg10_test.exe reg10_as.exe
+gcc -Wall -Wextra -O2 -std=c11 -Icommon -Iplatform -c common/reg10_mem.c -o common/reg10_mem.o
+gcc -Wall -Wextra -O2 -std=c11 -Icommon -Iplatform -c common/reg10_cpu.c -o common/reg10_cpu.o
+common/reg10_cpu.c: In function 'reg10_core_step':
+common/reg10_cpu.c:271:52: warning: operand of '?:' changes signedness from 'int' to 'unsigned int' due to unsignedness of other operand [-Wsign-compare]
+  271 |             uint32_t b = use_imm ? (uint32_t)imm : warp_get_gp(w, (int)rb, l);
+      |                                                    ^~~~~~~~~~~~~~~~~~~~~~~~~~
+common/reg10_cpu.c:278:52: warning: operand of '?:' changes signedness from 'int' to 'unsigned int' due to unsignedness of other operand [-Wsign-compare]
+  278 |             uint32_t b = use_imm ? (uint32_t)imm : warp_get_gp(w, (int)rb, l);
+      |                                                    ^~~~~~~~~~~~~~~~~~~~~~~~~~
+common/reg10_cpu.c:285:52: warning: operand of '?:' changes signedness from 'int' to 'unsigned int' due to unsignedness of other operand [-Wsign-compare]
+  285 |             uint32_t b = use_imm ? (uint32_t)imm : warp_get_gp(w, (int)rb, l);
+      |                                                    ^~~~~~~~~~~~~~~~~~~~~~~~~~
+common/reg10_cpu.c:292:52: warning: operand of '?:' changes signedness from 'int' to 'unsigned int' due to unsignedness of other operand [-Wsign-compare]
+  292 |             uint32_t b = use_imm ? (uint32_t)imm : warp_get_gp(w, (int)rb, l);
+      |                                                    ^~~~~~~~~~~~~~~~~~~~~~~~~~
+common/reg10_cpu.c:299:52: warning: operand of '?:' changes signedness from 'int' to 'unsigned int' due to unsignedness of other operand [-Wsign-compare]
+  299 |             uint32_t b = use_imm ? (uint32_t)imm : warp_get_gp(w, (int)rb, l);
+      |                                                    ^~~~~~~~~~~~~~~~~~~~~~~~~~
+common/reg10_cpu.c:306:52: warning: operand of '?:' changes signedness from 'int' to 'unsigned int' due to unsignedness of other operand [-Wsign-compare]
+  306 |             uint32_t b = use_imm ? (uint32_t)imm : warp_get_gp(w, (int)rb, l);
+      |                                                    ^~~~~~~~~~~~~~~~~~~~~~~~~~
+common/reg10_cpu.c:313:52: warning: operand of '?:' changes signedness from 'int' to 'unsigned int' due to unsignedness of other operand [-Wsign-compare]
+  313 |             uint32_t b = use_imm ? (uint32_t)imm : warp_get_gp(w, (int)rb, l);
+      |                                                    ^~~~~~~~~~~~~~~~~~~~~~~~~~
+common/reg10_cpu.c:320:52: warning: operand of '?:' changes signedness from 'int' to 'unsigned int' due to unsignedness of other operand [-Wsign-compare]
+  320 |             uint32_t b = use_imm ? (uint32_t)imm : warp_get_gp(w, (int)rb, l);
+      |                                                    ^~~~~~~~~~~~~~~~~~~~~~~~~~
+common/reg10_cpu.c:343:52: warning: operand of '?:' changes signedness from 'int' to 'unsigned int' due to unsignedness of other operand [-Wsign-compare]
+  343 |             uint32_t b = use_imm ? (uint32_t)imm : warp_get_gp(w, (int)rb, l);
+      |                                                    ^~~~~~~~~~~~~~~~~~~~~~~~~~
+common/reg10_cpu.c:345:52: warning: comparison of integer expressions of different signedness: 'int' and 'uint32_t' {aka 'unsigned int'} [-Wsign-compare]
+  345 |                         warp_get_gp(w, (int)ra, l) == b ? 1u : 0u);
+      |                                                    ^~
+common/reg10_cpu.c:613:19: warning: unused variable 'val' [-Wunused-variable]
+  613 |             float val = warp_get_fp(w, (int)ra, l);
+      |                   ^~~
+common/reg10_cpu.c:643:25: warning: dereferencing type-punned pointer will break strict-aliasing rules [-Wstrict-aliasing]
+  643 |             float v2 = *(float*)&imm;
+      |                         ^~~~~~~~~~~~
+common/reg10_cpu.c:659:52: warning: dereferencing type-punned pointer will break strict-aliasing rules [-Wstrict-aliasing]
+  659 |                 mem_write_u32(core->mem, db_addr, *(uint32_t*)&depth);
+      |                                                    ^~~~~~~~~~~~~~~~~
+gcc -Wall -Wextra -O2 -std=c11 -Icommon -Iplatform -c common/reg10_driver.c -o common/reg10_driver.o
+gcc -Wall -Wextra -O2 -std=c11 -Icommon -Iplatform -c common/reg10_asm.c -o common/reg10_asm.o
+common/reg10_asm.c: In function 'assemble_instr':
+common/reg10_asm.c:172:9: warning: unused variable 'err' [-Wunused-variable]
+  172 |     int err=0, is_branch=0; char *branch_label=NULL;
+      |         ^~~
+gcc -Wall -Wextra -O2 -std=c11 -Icommon -Iplatform -c platform/windows/reg10_platform.c -o platform/windows/reg10_platform.o
+ar rcs libreg10.a common/reg10_mem.o common/reg10_cpu.o common/reg10_driver.o common/reg10_asm.o platform/windows/reg10_platform.o
+gcc -Wall -Wextra -O2 -std=c11 -Icommon -Iplatform -o reg10_test.exe test/reg10_test.c libreg10.a -lm
+test/reg10_test.c: In function 'main':
+test/reg10_test.c:123:22: warning: unknown conversion type character 'z' in format [-Wformat=]
+  123 |     printf("kernel: %zu instructions (%zu bytes)\n", n, n * 8);
+      |                      ^
+test/reg10_test.c:123:40: warning: unknown conversion type character 'z' in format [-Wformat=]
+  123 |     printf("kernel: %zu instructions (%zu bytes)\n", n, n * 8);
+      |                                        ^
+test/reg10_test.c:123:12: warning: too many arguments for format [-Wformat-extra-args]
+  123 |     printf("kernel: %zu instructions (%zu bytes)\n", n, n * 8);
+      |            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+gcc -Wall -Wextra -O2 -std=c11 -Icommon -Iplatform -o reg10_as.exe common/reg10_asm.c -lm
+common/reg10_asm.c: In function 'assemble_instr':
+common/reg10_asm.c:172:9: warning: unused variable 'err' [-Wunused-variable]
+  172 |     int err=0, is_branch=0; char *branch_label=NULL;
+      |         ^~~
+C:/MinGW/bin/../lib/gcc/x86_64-w64-mingw32/13.2.0/../../../../x86_64-w64-mingw32/bin/ld.exe: C:/MinGW/bin/../lib/gcc/x86_64-w64-mingw32/13.2.0/../../../../x86_64-w64-mingw32/lib/../lib/libmingw32.a(lib64_libmingw32_a-crtexewin.o):crtexewin.c:(.text+0x130): undefined reference to `WinMain'
+collect2.exe: error: ld returned 1 exit status
+mingw32-make: *** [makefile:51: asm] Error 1

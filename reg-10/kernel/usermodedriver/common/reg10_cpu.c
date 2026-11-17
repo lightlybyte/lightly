@@ -546,19 +546,18 @@ int reg10_core_step(reg10_core_t *core)
             w->state = 2;
             break;
         }
-        struct { int busy_cycles; int dest_fp; int dest_warp; float results[REG10_LANES]; } *tu = &core->tensor_units[unit];
-        if (tu->busy_cycles > 0) {
+        if (core->tensor_units[unit].busy_cycles > 0) {
             w->state = 3;
             snprintf(w->wait_reason, sizeof(w->wait_reason), "tensor%d", unit);
             w->pc -= 8;
             break;
         }
-        tu->busy_cycles = 4;
-        tu->dest_fp = (int)rd;
-        tu->dest_warp = (int)w->warp_id;
+        core->tensor_units[unit].busy_cycles = 4;
+        core->tensor_units[unit].dest_fp = (int)rd;
+        core->tensor_units[unit].dest_warp = (int)w->warp_id;
         for (int i = 0; i < num_exec; i++) {
             int l = exec_lanes[i];
-            tu->results[l] = warp_get_fp(w, (int)ra, l) * warp_get_fp(w, (int)rb, l)
+            core->tensor_units[unit].results[l] = warp_get_fp(w, (int)ra, l) * warp_get_fp(w, (int)rb, l)
                            + warp_get_fp(w, (int)rd, l);
         }
         break;
@@ -651,7 +650,9 @@ int reg10_core_step(reg10_core_t *core)
             int l = exec_lanes[i];
             float depth = warp_get_fp(w, (int)ra, l);
             uint32_t db_addr = warp_get_gp(w, (int)rb, l);
-            float stored = *(float*)&mem_read_u32(core->mem, db_addr);
+            uint32_t stored_u32 = mem_read_u32(core->mem, db_addr);
+            float stored;
+            memcpy(&stored, &stored_u32, sizeof(float));
             if (depth > stored) {
                 w->active_mask &= ~(1u << l);
             } else {

@@ -105,7 +105,7 @@ int main(void)
     {
         /* imm = target_addr - (current_addr + 8) */
         int32_t imm = (int32_t)((xloop - n) * 8 - 8);
-        code[n++] = REG10_ENCODE(REG10_OP_BRA, 0, 0, 0, 0, 0, 0, 0, imm);
+        code[n++] = REG10_ENCODE(REG10_OP_BRA, 0, 0, 0, 0, 0, 1, imm);
     }
     /* ADDI r2, r2, 1           ; y += 1 */
     code[n++] = REG10_ENCODE(REG10_OP_IADD, 2, 2, 0, 31, 0, 1, 1);
@@ -115,7 +115,7 @@ int main(void)
     {
         /* imm = target_addr - (current_addr + 8) */
         int32_t imm = (int32_t)((yloop - n) * 8 - 8);
-        code[n++] = REG10_ENCODE(REG10_OP_BRA, 0, 0, 0, 0, 0, 0, 0, imm);
+        code[n++] = REG10_ENCODE(REG10_OP_BRA, 0, 0, 0, 0, 0, 1, imm);
     }
     /* HALT */
     code[n++] = REG10_ENCODE(REG10_OP_HALT, 0, 0, 0, 31, 0, 0, 0);

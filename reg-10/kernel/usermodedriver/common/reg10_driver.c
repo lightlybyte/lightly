@@ -33,6 +33,7 @@ struct reg10_context {
     reg10_mem_t    *mems[1024];
     reg10_shader_t *shaders[1024];
     reg10_fence_t  *fences[1024];
+    reg10_fence_t  *pending_fence;
     uint32_t num_mems;
     uint32_t num_shaders;
     uint32_t num_fences;
@@ -333,7 +334,7 @@ reg10_result_t reg10_queue_dispatch(reg10_queue_t *queue,
         reg10_core_launch_warp(core, (int)i, origin);
     }
 
-    if (fence) fence->signalled = 1;
+    /* Do NOT signal fence here - it will be signalled after reg10_device_run() completes */
     return REG10_SUCCESS;
 }
 
